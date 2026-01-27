@@ -1,0 +1,204 @@
+attack_technique: SCAN
+display_name: Localhost Network Scanning and Discovery
+atomic_tests:
+
+# -------------------------------------------------
+# T1016 – System Network Configuration Discovery
+# -------------------------------------------------
+- name: Local Network Configuration Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111101
+  description: >
+    Enumerates local network interfaces, IP configuration,
+    routing table and interface state on the local host.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      ipconfig /all
+      route print
+      netsh interface show interface
+
+      # Atomic mapping
+      Invoke-AtomicTest T1016 -TestNumbers 1
+
+
+# -------------------------------------------------
+# T1018 – Host Discovery
+# -------------------------------------------------
+- name: Localhost Host Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111102
+  description: >
+    Performs host discovery against localhost using ICMP
+    echo requests and NetBIOS queries.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      ping -n 3 127.0.0.1
+      nbtstat -A 127.0.0.1
+
+      # Atomic mapping
+      Invoke-AtomicTest T1018 -TestNumbers 1
+
+# -------------------------------------------------
+# T1046 – Network Service Discovery
+# -------------------------------------------------
+- name: Localhost Network Service Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111103
+  description: >
+    Probes common service ports on localhost to identify
+    accessible network services.
+  supported_platforms:
+    - windows
+  executor:
+    name: powershell
+    command: |
+      $ports = 80,135,139,445,3389,5985,8080
+      foreach ($p in $ports) {
+        Test-NetConnection 127.0.0.1 -Port $p
+      }
+
+      # Atomic mapping
+      Invoke-AtomicTest T1046 -TestNumbers 1
+# -------------------------------------------------
+# T1049 – Network Connections Discovery
+# -------------------------------------------------
+- name: Local Network Connection Enumeration
+  auto_generated_guid: 11111111-1111-1111-1111-111111111104
+  description: >
+    Enumerates active network connections and listening
+    ports on the local system.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      netstat -ano
+
+      # Atomic mapping
+      Invoke-AtomicTest T1049 -TestNumbers 1
+# -------------------------------------------------
+# T1135 – Network Share Discovery
+# -------------------------------------------------
+- name: Localhost SMB Share Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111105
+  description: >
+    Enumerates SMB shares and shared resources on the
+    local host.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      net view \\127.0.0.1
+      net share
+
+      # Atomic mapping
+      Invoke-AtomicTest T1135 -TestNumbers 1
+# -------------------------------------------------
+# T1040 – Network Sniffing
+# -------------------------------------------------
+- name: Localhost Network Sniffing via pktmon
+  auto_generated_guid: 11111111-1111-1111-1111-111111111106
+  description: >
+    Captures network traffic locally to observe scanning
+    and service discovery activity.
+  supported_platforms:
+    - windows
+  executor:
+    name: powershell
+    command: |
+      pktmon start
+      Start-Sleep -Seconds 10
+      pktmon stop
+
+      # Atomic mapping
+      Invoke-AtomicTest T1040 -TestNumbers 1
+
+# -------------------------------------------------
+# T1021.001 – RDP Service Discovery (No GUI)
+# -------------------------------------------------
+- name: Localhost RDP Service Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111107
+  description: >
+    Probes the RDP service on localhost without initiating
+    an interactive RDP session.
+  supported_platforms:
+    - windows
+  executor:
+    name: powershell
+    command: |
+      Test-NetConnection 127.0.0.1 -Port 3389
+
+      # Atomic mapping
+      Invoke-AtomicTest T1021.001 -TestNumbers 1
+# -------------------------------------------------
+# T1021.006 – WinRM Service Discovery
+# -------------------------------------------------
+- name: Localhost WinRM Service Discovery
+  auto_generated_guid: 11111111-1111-1111-1111-111111111108
+  description: >
+    Probes the WinRM service port on localhost to detect
+    remote management capability.
+  supported_platforms:
+    - windows
+  executor:
+    name: powershell
+    command: |
+      Test-NetConnection 127.0.0.1 -Port 5985
+
+      # Atomic mapping
+      Invoke-AtomicTest T1021.006 -TestNumbers 1
+# -------------------------------------------------
+# T1105 – Ingress Tool Transfer
+# -------------------------------------------------
+- name: Localhost Tool Transfer over HTTP
+  auto_generated_guid: 11111111-1111-1111-1111-111111111109
+  description: >
+    Downloads a file from a local HTTP service to simulate
+    ingress tool transfer behavior.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      certutil -urlcache -f http://127.0.0.1:8080/index.html downloaded_test.html
+
+      # Atomic mapping
+      Invoke-AtomicTest T1105 -TestNumbers 1
+# -------------------------------------------------
+# T1071.001 – Application Layer Protocol
+# -------------------------------------------------
+- name: Localhost HTTP Beaconing
+  auto_generated_guid: 11111111-1111-1111-1111-111111111110
+  description: >
+    Generates repeated HTTP requests to localhost to simulate
+    command-and-control beaconing.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      for /L %i in (1,1,10) do curl http://127.0.0.1:8080/beacon
+
+      # Atomic mapping
+      Invoke-AtomicTest T1071.001 -TestNumbers 1
+# -------------------------------------------------
+# T1095 – Non-Application Layer Protocol
+# -------------------------------------------------
+- name: Localhost ICMP Signaling
+  auto_generated_guid: 11111111-1111-1111-1111-111111111111
+  description: >
+    Generates sustained ICMP traffic to simulate non-application
+    layer signaling behavior.
+  supported_platforms:
+    - windows
+  executor:
+    name: command_prompt
+    command: |
+      ping -n 15 127.0.0.1
+
+      # Atomic mapping
+      Invoke-AtomicTest T1095 -TestNumbers 1
