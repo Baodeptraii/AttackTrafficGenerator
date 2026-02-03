@@ -1,0 +1,502 @@
+attack_technique: T1046
+display_name: Nmap Active Network Scanning - Real IP + Localhost Lab Scenario
+description: 'Lab scenario that simulates Active Scanning with Nmap on Windows 10. The tests focus on host discovery, port
+  scanning, service/version detection, OS fingerprinting, and basic NSE scripts against a real lab IP (default: 192.168.1.133)
+  and the localhost interface (127.0.0.1). The goal is to generate clear network and process telemetry for Sysmon/Wazuh/SIEM
+  detection engineering.
+
+  '
+atomic_tests:
+- name: '[0] Download and Install Nmap silently'
+  auto_generated_guid: 22222222-0000-0000-0000-000000000000
+  description: 'Download the Nmap Windows installer from nmap.org and install it silently (/S). Then verify the installation
+    by locating nmap.exe and running: nmap --version. Note: The official Nmap NSIS installer supports /S for silent mode.
+    However, fully silent installation requires Npcap to already be installed on the system (otherwise the installer will
+    prompt and exit). Npcap is also required for raw packet scanning modes (e.g., SYN scan -sS).
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    download_dir:
+      description: Directory used to download the Nmap installer
+      type: string
+      default: C:\Temp\NmapInstall
+    nmap_version:
+      description: Nmap version to download (must exist on nmap.org/dist)
+      type: string
+      default: '7.95'
+    install_wait_seconds:
+      description: How long to wait for nmap.exe to appear after the installer exits
+      type: integer
+      default: 120
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\n\n# Ensure TLS 1.2 for older PowerShell defaults\ntry { [Net.ServicePointManager]::SecurityProtocol\
+      \ = [Net.SecurityProtocolType]::Tls12 } catch {}\n\n$downloadDir = \"#{download_dir}\"\n$nmapVersion = \"#{nmap_version}\"\
+      \n$waitSeconds = [int]\"#{install_wait_seconds}\"\n\nfunction Get-NmapExePath {\n  $candidates = New-Object System.Collections.Generic.List[string]\n\
+      \n  $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { [void]$candidates.Add($cmd.Source)\
+      \ }\n\n  if ($env:ProgramFiles) { [void]$candidates.Add((Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\")) }\n  if (${env:ProgramFiles(x86)})\
+      \ { [void]$candidates.Add((Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\")) }\n\n  # De-duplicate and keep only\
+      \ existing paths\n  $existing = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique\n  return\
+      \ ($existing | Select-Object -First 1)\n}\n\nif (-not (Test-Path $downloadDir)) {\n  New-Item -ItemType Directory -Force\
+      \ -Path $downloadDir | Out-Null\n  Write-Host \"Created directory: $downloadDir\"\n}\n\n$installerUrl  = \"https://nmap.org/dist/nmap-$nmapVersion-setup.exe\"\
+      \n$installerPath = Join-Path $downloadDir \"nmap-$nmapVersion-setup.exe\"\n\nWrite-Host \"=== DOWNLOADING NMAP $nmapVersion\
+      \ ===\"\nInvoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing\n\nif (-not (Test-Path $installerPath))\
+      \ {\n  Write-Error \"Download failed: $installerPath\"\n  exit 1\n}\n\n$sizeMB = [math]::Round((Get-Item $installerPath).Length\
+      \ / 1MB, 2)\nWrite-Host \"Downloaded: $installerPath ($sizeMB MB)\"\n\nfunction Test-NpcapInstalled {\n  $k1 = \"HKLM:\\\
+      SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NpcapInst\"\n  $k2 = \"HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\\
+      Windows\\CurrentVersion\\Uninstall\\NpcapInst\"\n  if (Test-Path $k1) { return $true }\n  if (Test-Path $k2) { return\
+      \ $true }\n  return $false\n}\n\nif (-not (Test-NpcapInstalled)) {\n  Write-Error \"Npcap was not detected. Silent install\
+      \ of the official Nmap installer requires Npcap to be installed first. Install Npcap (interactive) and re-run this test.\"\
+      \n  exit 1\n}\n\nWrite-Host \"=== INSTALLING NMAP SILENTLY ===\"\n$proc = Start-Process -FilePath $installerPath -ArgumentList\
+      \ \"/S\" -Wait -PassThru\nWrite-Host (\"Installer exit code: {0}\" -f $proc.ExitCode)\n\nWrite-Host \"=== WAITING FOR\
+      \ NMAP.EXE ===\"\n$nmapExe = $null\n$elapsed = 0\nwhile ($elapsed -lt $waitSeconds) {\n  $nmapExe = Get-NmapExePath\n\
+      \  if ($nmapExe) { break }\n  Start-Sleep -Seconds 2\n  $elapsed += 2\n}\n\nif (-not $nmapExe) {\n  Write-Error (\"\
+      Nmap verification failed. nmap.exe was not found after waiting {0} seconds. Checked PATH, %ProgramFiles%\\Nmap and %ProgramFiles(x86)%\\\
+      Nmap.\" -f $waitSeconds)\n  exit 1\n}\n\n# Add install dir to PATH for this session (helps subsequent tests in the same\
+      \ shell)\n$nmapDir = Split-Path -Path $nmapExe -Parent\nif ($env:Path -notmatch [regex]::Escape($nmapDir)) {\n  $env:Path\
+      \ = \"$nmapDir;$env:Path\"\n}\n\nWrite-Host \"=== NMAP INSTALLED ===\"\nWrite-Host (\"Using: {0}\" -f $nmapExe)\n& $nmapExe\
+      \ --version\nif ($LASTEXITCODE -ne 0) {\n  Write-Error (\"Nmap was found but returned a non-zero exit code: {0}\" -f\
+      \ $LASTEXITCODE)\n  exit 1\n}\n\nWrite-Host \"[+] Nmap installed and verified successfully\"\nexit 0\n"
+- name: '[1] T1595.002 - Host Discovery on 192.168.1.133'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111101
+  description: 'Perform host discovery using an Nmap ping scan (-sn) against the target host. This generates ICMP/ARP-related
+    traffic that is useful for telemetry collection.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host (lab IP)
+      type: string
+      default: 192.168.1.133
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first to install Nmap."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n& $nmapExe -sn\
+      \ \"#{target_host}\"\nexit $LASTEXITCODE\n"
+- name: '[2] T1046 - Service Scan on 192.168.1.133'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111102
+  description: 'Scan TCP ports on the target using SYN scan (-sS) and service/version detection (-sV). Output is written to
+    a normal output file (-oN) for later review. Requires elevation and typically requires Npcap for raw packet scanning.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: 192.168.1.133
+    port_range:
+      description: Port range to scan
+      type: string
+      default: 1-1024
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_service_scan_192.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -Pn -sS -sV -p \"#{port_range}\" \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
+- name: '[3] T1046 - OS Detection on 192.168.1.133'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111103
+  description: 'Perform OS fingerprinting against the target using Nmap OS detection (-O). Output is written to a normal output
+    file (-oN) for later review. Requires elevation and may need Npcap for best results.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: 192.168.1.133
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_os_scan_192.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -Pn -O \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
+- name: '[4] T1595.002 - NSE Script Scan on 192.168.1.133'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111104
+  description: 'Run default Nmap NSE scripts (-sC) together with service/version detection (-sV) on a set of common ports
+    on the target host.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: 192.168.1.133
+    ports:
+      description: Comma-separated list of ports to scan
+      type: string
+      default: 80,135,139,445,3389,5985,8080
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_nse_scan_192.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -Pn -sV -sC -p \"#{ports}\" \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
+- name: '[5] T1046 - Aggressive Scan on 192.168.1.133'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111105
+  description: 'Run an aggressive scan (-A) against the target. This typically includes OS detection, version detection, default
+    scripts, and traceroute where supported. Output is written to a normal output file (-oN).
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: 192.168.1.133
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_aggressive_192.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -A \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
+- name: '[6] T1595.002 - Host Discovery on localhost'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111106
+  description: 'Perform host discovery against localhost (127.0.0.1) using a ping scan (-sn). Useful for generating local
+    scanning telemetry without relying on a remote host.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host (localhost)
+      type: string
+      default: 127.0.0.1
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n& $nmapExe -sn\
+      \ \"#{target_host}\"\nexit $LASTEXITCODE\n"
+- name: '[7] T1046 - Service Scan on localhost'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111107
+  description: 'Scan TCP ports on localhost (127.0.0.1) using a TCP connect scan (-sT) and service/version detection (-sV).
+    Connect scan is used because raw SYN scanning on Windows loopback is not always supported.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host (localhost)
+      type: string
+      default: 127.0.0.1
+    port_range:
+      description: Ports to scan (comma-separated list or range)
+      type: string
+      default: 80,3389,5985,8080
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_localhost_scan.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -Pn -sT -sV -p \"#{port_range}\" \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
+- name: '[8] T1046 - Aggressive Scan on localhost'
+  auto_generated_guid: 22222222-1111-1111-1111-111111111108
+  description: 'Run an aggressive scan (-A) against localhost (127.0.0.1) to simulate a more complete scan. Uses TCP connect
+    scan (-sT) with -A to remain compatible with loopback scanning on Windows.
+
+    '
+  supported_platforms:
+  - windows
+  input_arguments:
+    target_host:
+      description: Target host (localhost)
+      type: string
+      default: 127.0.0.1
+    output_file:
+      description: Path to save Nmap output (-oN)
+      type: string
+      default: '%TEMP%\nmap_localhost_aggressive.txt'
+  dependency_executor_name: powershell
+  dependencies:
+  - description: Nmap must be installed (nmap.exe present)
+    prereq_command: '$paths = @()
+
+      $cmd = Get-Command nmap.exe -ErrorAction SilentlyContinue
+
+      if ($cmd -and $cmd.Source) { $paths += $cmd.Source }
+
+      if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles "Nmap\nmap.exe") }
+
+      if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} "Nmap\nmap.exe") }
+
+      $paths = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+      if ($paths.Count -gt 0) { exit 0 } else { exit 1 }
+
+      '
+    get_prereq_command: 'Write-Host "[!] Nmap not found. Run test [0] first."
+
+      exit 1
+
+      '
+  executor:
+    name: powershell
+    elevation_required: true
+    command: "$ErrorActionPreference = \"Stop\"\nfunction Get-NmapExePath {\n  $candidates = @()\n  $cmd = Get-Command nmap.exe\
+      \ -ErrorAction SilentlyContinue\n  if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }\n  if ($env:ProgramFiles)\
+      \ { $candidates += (Join-Path $env:ProgramFiles \"Nmap\\nmap.exe\") }\n  if (${env:ProgramFiles(x86)}) { $candidates\
+      \ += (Join-Path ${env:ProgramFiles(x86)} \"Nmap\\nmap.exe\") }\n  $candidates = $candidates | Where-Object { $_ -and\
+      \ (Test-Path $_) } | Select-Object -Unique\n  return ($candidates | Select-Object -First 1)\n}\n$nmapExe = Get-NmapExePath\n\
+      if (-not $nmapExe) {\n  Write-Error \"Nmap executable not found. Run test [0] first.\"\n  exit 1\n}\n$out = [Environment]::ExpandEnvironmentVariables(\"#{output_file}\")\
+      \n$dir = Split-Path $out -Parent\nif ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir\
+      \ | Out-Null }\n& $nmapExe -Pn -sT -A \"#{target_host}\" -oN \"$out\"\nexit $LASTEXITCODE\n"
+  cleanup_command: '$out=[Environment]::ExpandEnvironmentVariables("#{output_file}")
+
+    if (Test-Path $out) { Remove-Item $out -Force }
+
+    '
