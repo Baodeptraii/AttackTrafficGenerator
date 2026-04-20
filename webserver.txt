@@ -1,0 +1,599 @@
+Được. Mình sẽ đưa cho bạn một lab **Apache + PHP + MariaDB trên Ubuntu** đủ để mô phỏng các lỗi web phổ biến như:
+
+* đăng nhập với SQL injection
+* search field với SQL injection
+* reflected XSS
+* upload file nguy hiểm
+* lộ cấu hình / quyền file sai
+* session/cookie yếu
+
+Mình sẽ giữ nó ở mức **lab nội bộ trên máy ảo hoặc mạng local**, không nên mở Internet công khai.
+
+## Mô hình lab
+
+* Ubuntu Server
+* Apache2
+* PHP
+* MariaDB
+* 1 web app PHP rất đơn giản gồm:
+
+  * `login.php`
+  * `search.php`
+  * `upload.php`
+  * `dashboard.php`
+  * database `labapp`
+
+---
+
+## 1) Cài package trên Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y apache2 mariadb-server php libapache2-mod-php php-mysql php-cli unzip
+```
+
+Bật service:
+
+```bash
+sudo systemctl enable apache2 mariadb
+sudo systemctl start apache2 mariadb
+```
+
+Kiểm tra:
+
+```bash
+systemctl status apache2
+systemctl status mariadb
+```
+
+---
+
+## 2) Tạo database và user
+
+Đăng nhập MariaDB:
+
+```bash
+sudo mysql
+```
+
+Chạy SQL:
+
+```sql
+CREATE DATABASE labapp;
+CREATE USER 'labuser'@'localhost' IDENTIFIED BY 'labpass123';
+GRANT ALL PRIVILEGES ON labapp.* TO 'labuser'@'localhost';
+FLUSH PRIVILEGES;
+
+USE labapp;
+
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    password VARCHAR(50) NOT NULL,
+    role VARCHAR(20) DEFAULT 'user'
+);
+
+INSERT INTO users (username, password, role) VALUES
+('admin', 'admin123', 'admin'),
+('test', 'test123', 'user');
+
+CREATE TABLE products (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    price DECIMAL(10,2)
+);
+
+INSERT INTO products (name, description, price) VALUES
+('Laptop', 'Business laptop', 899.99),
+('Mouse', 'Wireless mouse', 19.99),
+('Keyboard', 'Mechanical keyboard', 59.99),
+('Monitor', '24 inch monitor', 149.99);
+EXIT;
+```
+
+---
+
+## 3) Tạo thư mục web app
+
+```bash
+sudo mkdir -p /var/www/html/lab
+sudo chown -R $USER:$USER /var/www/html/lab
+```
+
+---
+
+## 4) Tạo file cấu hình DB
+
+Tạo `/var/www/html/lab/db.php`
+
+```php
+<?php
+$host = "localhost";
+$user = "labuser";
+$pass = "labpass123";
+$db   = "labapp";
+
+$conn = mysqli_connect($host, $user, $pass, $db);
+
+if (!$conn) {
+    die("Database connection failed: " . mysqli_connect_error());
+}
+?>
+```
+
+---
+
+## 5) Tạo login form
+
+Tạo `/var/www/html/lab/login.php`
+
+```php
+<?php
+session_start();
+include 'db.php';
+
+$message = "";
+
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username = $_POST['username'];
+    $password = $_POST['password'];
+
+    // Cố ý không dùng prepared statement để lab SQLi
+    $sql = "SELECT * FROM users WHERE username='$username' AND password='$password'";
+    $result = mysqli_query($conn, $sql);
+
+    if ($result && mysqli_num_rows($result) > 0) {
+        $user = mysqli_fetch_assoc($result);
+        $_SESSION['username'] = $user['username'];
+        $_SESSION['role'] = $user['role'];
+        header("Location: dashboard.php");
+        exit;
+    } else {
+        $message = "Login failed";
+    }
+}
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <h2>Lab Login</h2>
+    <form method="POST">
+        <label>Username:</label><br>
+        <input type="text" name="username"><br><br>
+        <label>Password:</label><br>
+        <input type="text" name="password"><br><br>
+        <button type="submit">Login</button>
+    </form>
+    <p style="color:red;"><?php echo $message; ?></p>
+    <p><a href="search.php">Search products</a></p>
+    <p><a href="upload.php">Upload file</a></p>
+</body>
+</html>
+```
+
+---
+
+## 6) Tạo dashboard
+
+Tạo `/var/www/html/lab/dashboard.php`
+
+```php
+<?php
+session_start();
+if (!isset($_SESSION['username'])) {
+    header("Location: login.php");
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard</title>
+</head>
+<body>
+    <h2>Welcome, <?php echo $_SESSION['username']; ?></h2>
+    <p>Role: <?php echo $_SESSION['role']; ?></p>
+    <ul>
+        <li><a href="search.php">Search products</a></li>
+        <li><a href="upload.php">Upload file</a></li>
+        <li><a href="logout.php">Logout</a></li>
+    </ul>
+</body>
+</html>
+```
+
+Tạo `/var/www/html/lab/logout.php`
+
+```php
+<?php
+session_start();
+session_destroy();
+header("Location: login.php");
+exit;
+```
+
+---
+
+## 7) Tạo search field
+
+Tạo `/var/www/html/lab/search.php`
+
+```php
+<?php
+include 'db.php';
+$q = isset($_GET['q']) ? $_GET['q'] : "";
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Search</title>
+</head>
+<body>
+    <h2>Product Search</h2>
+    <form method="GET">
+        <input type="text" name="q" value="<?php echo $q; ?>">
+        <button type="submit">Search</button>
+    </form>
+
+    <h3>Results</h3>
+    <?php
+    if ($q != "") {
+        // Cố ý vulnerable để lab SQLi
+        $sql = "SELECT * FROM products WHERE name LIKE '%$q%'";
+        $result = mysqli_query($conn, $sql);
+
+        if ($result) {
+            while ($row = mysqli_fetch_assoc($result)) {
+                echo "<p><b>" . $row['name'] . "</b> - " . $row['description'] . " - $" . $row['price'] . "</p>";
+            }
+        } else {
+            echo "<p>Query error: " . mysqli_error($conn) . "</p>";
+        }
+    }
+    ?>
+
+    <h3>Echo</h3>
+    <p>You searched for: <?php echo $q; ?></p>
+
+    <p><a href="login.php">Back to login</a></p>
+</body>
+</html>
+```
+
+`You searched for: <?php echo $q; ?>` là chỗ cố ý dễ dính **reflected XSS**.
+
+---
+
+## 8) Tạo upload page
+
+Tạo `/var/www/html/lab/upload.php`
+
+```php
+<?php
+$message = "";
+$uploadDir = "uploads/";
+
+if (!is_dir($uploadDir)) {
+    mkdir($uploadDir, 0777, true);
+}
+
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES["file"])) {
+    $target = $uploadDir . basename($_FILES["file"]["name"]);
+
+    // Cố ý không kiểm tra loại file
+    if (move_uploaded_file($_FILES["file"]["tmp_name"], $target)) {
+        $message = "Uploaded: <a href='$target'>$target</a>";
+    } else {
+        $message = "Upload failed";
+    }
+}
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upload</title>
+</head>
+<body>
+    <h2>File Upload</h2>
+    <form method="POST" enctype="multipart/form-data">
+        <input type="file" name="file">
+        <button type="submit">Upload</button>
+    </form>
+    <p><?php echo $message; ?></p>
+    <p><a href="login.php">Back</a></p>
+</body>
+</html>
+```
+
+---
+
+## 9) Phân quyền thư mục uploads
+
+```bash
+mkdir -p /var/www/html/lab/uploads
+chmod 777 /var/www/html/lab/uploads
+```
+
+---
+
+## 10) Tạo Apache VirtualHost
+
+Tạo file `/etc/apache2/sites-available/lab.conf`
+
+```apache
+<VirtualHost *:80>
+    ServerName lab.local
+    DocumentRoot /var/www/html/lab
+
+    <Directory /var/www/html/lab>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/lab_error.log
+    CustomLog ${APACHE_LOG_DIR}/lab_access.log combined
+</VirtualHost>
+```
+
+Bật site:
+
+```bash
+sudo a2ensite lab.conf
+sudo a2dissite 000-default.conf
+sudo systemctl reload apache2
+```
+
+---
+
+## 11) Thêm hosts local
+
+Trên máy Ubuntu hoặc máy client:
+
+```bash
+sudo nano /etc/hosts
+```
+
+Thêm:
+
+```text
+127.0.0.1 lab.local
+```
+
+Nếu truy cập từ máy khác trong LAN, thay `127.0.0.1` bằng IP server Ubuntu.
+
+---
+
+## 12) Truy cập
+
+Mở:
+
+```text
+http://lab.local/login.php
+```
+
+Tài khoản mẫu:
+
+* `admin / admin123`
+* `test / test123`
+
+---
+
+## 13) Các lỗi cố ý có trong lab
+
+Lab này đang cố tình có:
+
+* **SQL Injection** ở `login.php`
+* **SQL Injection** ở `search.php`
+* **Reflected XSS** ở `search.php`
+* **Unsafe File Upload** ở `upload.php`
+* **Weak password storage** vì lưu plain text
+* **Session đơn giản** không hardening
+* **Permissions yếu** ở thư mục `uploads`
+
+---
+
+## 14) Khuyến nghị để lab an toàn
+
+Chỉ nên chạy trong:
+
+* VM riêng
+* NAT-only / Host-only network
+* Docker bridge nội bộ
+* không mở port ra Internet
+* không dùng máy thật chứa dữ liệu quan trọng
+
+Tối thiểu nên chặn bằng UFW:
+
+```bash
+sudo ufw allow from 192.168.0.0/16 to any port 80
+sudo ufw enable
+```
+
+Hoặc chỉ bind nội bộ nếu bạn muốn lab hoàn toàn local.
+
+---
+
+## 15) Cách nhanh hơn: dùng app lab có sẵn
+
+Nếu mục tiêu chính là mô phỏng lỗi web, nhanh hơn nhiều là dùng:
+
+* **DVWA**
+* **OWASP Juice Shop**
+* **Mutillidae II**
+
+Nhưng nếu bạn muốn **Apache + PHP thuần trên Ubuntu để tự chỉnh file**, bộ lab ở trên hợp hơn.
+
+---
+
+## 16) Phiên bản cài siêu nhanh bằng script
+
+Bạn có thể gom phần tạo file bằng script này:
+
+```bash
+cd /var/www/html/lab
+
+cat > db.php <<'EOF'
+<?php
+$host = "localhost";
+$user = "labuser";
+$pass = "labpass123";
+$db   = "labapp";
+$conn = mysqli_connect($host, $user, $pass, $db);
+if (!$conn) {
+    die("Database connection failed: " . mysqli_connect_error());
+}
+?>
+EOF
+
+cat > login.php <<'EOF'
+<?php
+session_start();
+include 'db.php';
+$message = "";
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username = $_POST['username'];
+    $password = $_POST['password'];
+    $sql = "SELECT * FROM users WHERE username='$username' AND password='$password'";
+    $result = mysqli_query($conn, $sql);
+    if ($result && mysqli_num_rows($result) > 0) {
+        $user = mysqli_fetch_assoc($result);
+        $_SESSION['username'] = $user['username'];
+        $_SESSION['role'] = $user['role'];
+        header("Location: dashboard.php");
+        exit;
+    } else {
+        $message = "Login failed";
+    }
+}
+?>
+<!DOCTYPE html>
+<html><head><title>Login</title></head><body>
+<h2>Lab Login</h2>
+<form method="POST">
+<label>Username:</label><br>
+<input type="text" name="username"><br><br>
+<label>Password:</label><br>
+<input type="text" name="password"><br><br>
+<button type="submit">Login</button>
+</form>
+<p style="color:red;"><?php echo $message; ?></p>
+<p><a href="search.php">Search products</a></p>
+<p><a href="upload.php">Upload file</a></p>
+</body></html>
+EOF
+
+cat > dashboard.php <<'EOF'
+<?php
+session_start();
+if (!isset($_SESSION['username'])) {
+    header("Location: login.php");
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html><head><title>Dashboard</title></head><body>
+<h2>Welcome, <?php echo $_SESSION['username']; ?></h2>
+<p>Role: <?php echo $_SESSION['role']; ?></p>
+<ul>
+<li><a href="search.php">Search products</a></li>
+<li><a href="upload.php">Upload file</a></li>
+<li><a href="logout.php">Logout</a></li>
+</ul>
+</body></html>
+EOF
+
+cat > logout.php <<'EOF'
+<?php
+session_start();
+session_destroy();
+header("Location: login.php");
+exit;
+EOF
+
+cat > search.php <<'EOF'
+<?php
+include 'db.php';
+$q = isset($_GET['q']) ? $_GET['q'] : "";
+?>
+<!DOCTYPE html>
+<html><head><title>Search</title></head><body>
+<h2>Product Search</h2>
+<form method="GET">
+<input type="text" name="q" value="<?php echo $q; ?>">
+<button type="submit">Search</button>
+</form>
+<h3>Results</h3>
+<?php
+if ($q != "") {
+    $sql = "SELECT * FROM products WHERE name LIKE '%$q%'";
+    $result = mysqli_query($conn, $sql);
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            echo "<p><b>" . $row['name'] . "</b> - " . $row['description'] . " - $" . $row['price'] . "</p>";
+        }
+    } else {
+        echo "<p>Query error: " . mysqli_error($conn) . "</p>";
+    }
+}
+?>
+<h3>Echo</h3>
+<p>You searched for: <?php echo $q; ?></p>
+<p><a href="login.php">Back to login</a></p>
+</body></html>
+EOF
+
+cat > upload.php <<'EOF'
+<?php
+$message = "";
+$uploadDir = "uploads/";
+if (!is_dir($uploadDir)) {
+    mkdir($uploadDir, 0777, true);
+}
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES["file"])) {
+    $target = $uploadDir . basename($_FILES["file"]["name"]);
+    if (move_uploaded_file($_FILES["file"]["tmp_name"], $target)) {
+        $message = "Uploaded: <a href='$target'>$target</a>";
+    } else {
+        $message = "Upload failed";
+    }
+}
+?>
+<!DOCTYPE html>
+<html><head><title>Upload</title></head><body>
+<h2>File Upload</h2>
+<form method="POST" enctype="multipart/form-data">
+<input type="file" name="file">
+<button type="submit">Upload</button>
+</form>
+<p><?php echo $message; ?></p>
+<p><a href="login.php">Back</a></p>
+</body></html>
+EOF
+
+mkdir -p uploads
+chmod 777 uploads
+```
+
+---
+
+## 17) Mình khuyên bạn làm thêm 2 mode
+
+Để học dễ hơn, bạn nên có:
+
+* **mode vulnerable**: như code trên
+* **mode fixed**: dùng prepared statements, password_hash, htmlspecialchars, upload validation
+
+Như vậy bạn vừa mô phỏng lỗi vừa so sánh cách vá.
+
+Mình có thể viết tiếp cho bạn một bộ **project hoàn chỉnh dạng thư mục sẵn dùng**, gồm:
+
+* toàn bộ file PHP
+* file SQL import
+* file Apache vhost
+* bản **vulnerable**
+* bản **fixed**
+* và một `setup.sh` để chạy 1 lệnh là lên lab trên Ubuntu.

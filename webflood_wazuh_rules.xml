@@ -1,0 +1,316 @@
+<!--
+  ================================================================
+  WEBFLOOD v4.0 – Wazuh Local Rules
+  File: /var/ossec/etc/rules/local_rules.xml
+  
+  Cai dat:
+    1. Copy noi dung nay vao cuoi /var/ossec/etc/rules/local_rules.xml
+       (truoc the dong </group> cuoi cung neu co)
+    2. sudo systemctl restart wazuh-manager
+    3. Kiem tra: sudo /var/ossec/bin/ossec-logtest
+  
+  Yeu cau Apache phai dung Combined Log Format:
+    CustomLog ${APACHE_LOG_DIR}/lab_access.log combined
+  Wazuh phai doc file nay – them vao ossec.conf:
+    <localfile>
+      <log_format>apache</log_format>
+      <location>/var/log/apache2/lab_access.log</location>
+    </localfile>
+  ================================================================
+-->
+
+<group name="webflood,web_attack,T1190,T1595,T1505">
+
+  <!-- ============================================================
+       NHOM 1 – T1595.003: Directory Enumeration / 404 Flood
+       Wazuh built-in SID 30301/30302 xu ly HTTP 404.
+       Rule duoi day la frequency rule tren 404 do built-in sinh ra.
+       ============================================================ -->
+
+  <!-- Base rule: bat HTTP 404 tren Apache lab -->
+  <rule id="100401" level="3">
+    <if_sid>30301</if_sid>
+    <url>/lab/</url>
+    <description>WEBFLOOD: HTTP 404 tren /lab/ (directory probe)</description>
+    <mitre>
+      <id>T1595.003</id>
+    </mitre>
+    <group>web_scan,http_404</group>
+  </rule>
+
+  <!-- Frequency: >10 HTTP 404 trong 60s tu cung IP = DirBuster pattern -->
+  <rule id="100402" level="12" frequency="10" timeframe="60">
+    <if_matched_sid>100401</if_matched_sid>
+    <same_source_ip/>
+    <description>WEBFLOOD T1595.003: 404 Flood – Directory Brute-force tu $(srcip) (>10/60s)</description>
+    <mitre>
+      <id>T1595.003</id>
+    </mitre>
+    <group>web_scan,brute_force,high_volume</group>
+  </rule>
+
+  <!-- Phat hien quet file PHP nhaycam cu the -->
+  <rule id="100403" level="10">
+    <if_sid>30301</if_sid>
+    <url>db.php|config.php|backup.sql|\.env|\.git|phpinfo\.php|dump\.sql</url>
+    <description>WEBFLOOD T1595.003: Quet file nhaycam – $(url) tu $(srcip)</description>
+    <mitre>
+      <id>T1595.003</id>
+    </mitre>
+    <group>web_scan,sensitive_file</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM 2 – T1595.002: Malicious User-Agent (Scanner)
+       Apache log ghi User-Agent trong combined format.
+       Wazuh decoder "web-accesslog" parse ra field ua.
+       ============================================================ -->
+
+  <rule id="100411" level="12">
+    <if_sid>31103,31106,30101</if_sid>
+    <match>Nikto|nikto</match>
+    <description>WEBFLOOD T1595.002: Nikto scanner detected tu $(srcip)</description>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+    <group>vuln_scan,malicious_ua</group>
+  </rule>
+
+  <rule id="100412" level="12">
+    <if_sid>31103,31106,30101</if_sid>
+    <match>sqlmap</match>
+    <description>WEBFLOOD T1595.002: sqlmap scanner detected tu $(srcip)</description>
+    <mitre>
+      <id>T1595.002</id>
+      <id>T1190</id>
+    </mitre>
+    <group>vuln_scan,malicious_ua,sqli</group>
+  </rule>
+
+  <rule id="100413" level="10">
+    <if_sid>31103,31106,30101</if_sid>
+    <match>Nmap Scripting Engine|masscan|DirBuster|Nessus|OWASP ZAP|Burp Suite|w3af</match>
+    <description>WEBFLOOD T1595.002: Vulnerability scanner UA detected – $(match) tu $(srcip)</description>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+    <group>vuln_scan,malicious_ua</group>
+  </rule>
+
+  <!-- Frequency: nhieu scanner request trong thoi gian ngan -->
+  <rule id="100414" level="13" frequency="5" timeframe="30">
+    <if_matched_group>malicious_ua</if_matched_group>
+    <same_source_ip/>
+    <description>WEBFLOOD T1595.002: Scanner flood – nhieu Malicious UA tu $(srcip) (>5/30s)</description>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+    <group>vuln_scan,high_volume</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM 3 – T1190 (AUTH): SQL Injection tai login.php
+       Wazuh built-in da co rule 31103 (web attack generic).
+       Rule nay bo sung detection cu the cho lab nay.
+       ============================================================ -->
+
+  <!-- SQL Injection trong POST body hoac URL -->
+  <rule id="100421" level="13">
+    <if_sid>31103,31106</if_sid>
+    <url>login.php</url>
+    <match>OR|UNION|SELECT|INSERT|DROP|--|#|'|%27|%22</match>
+    <description>WEBFLOOD T1190: SQL Injection attempt tai /lab/login.php tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,sqli,auth_attack</group>
+  </rule>
+
+  <!-- Auth bypass – nhieu POST that bai + dac biet payload -->
+  <rule id="100422" level="14" frequency="5" timeframe="60">
+    <if_matched_sid>100421</if_matched_sid>
+    <same_source_ip/>
+    <description>WEBFLOOD T1190: SQLi Brute-force tai login.php – >5 lan tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+      <id>T1110.001</id>
+    </mitre>
+    <group>web_attack,sqli,brute_force</group>
+  </rule>
+
+  <!-- Phat hien cac keyword SQLi pho bien trong bat ky URL nao cua lab -->
+  <rule id="100423" level="12">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>/lab/</url>
+    <match>UNION\s+SELECT|OR\s+1=1|AND\s+1=1|AND\s+1=2|SLEEP\s*\(|extractvalue|information_schema|load_file</match>
+    <description>WEBFLOOD T1190: SQL Injection keyword detected – $(match) tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,sqli</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM 4 – T1190 (DATA): SQLi + XSS tai search.php
+       ============================================================ -->
+
+  <!-- XSS payload trong request -->
+  <rule id="100431" level="11">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>search.php</url>
+    <match>&lt;script|onerror=|onload=|javascript:|alert\(|document\.cookie|fetch\(</match>
+    <description>WEBFLOOD T1190: Reflected XSS attempt tai /lab/search.php tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,xss</group>
+  </rule>
+
+  <!-- SQLi tai search.php – dump data -->
+  <rule id="100432" level="13">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>search.php</url>
+    <match>UNION|information_schema|load_file|extractvalue|SLEEP</match>
+    <description>WEBFLOOD T1190: SQL Injection tai /lab/search.php – $(match) tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,sqli,data_exfil</group>
+  </rule>
+
+  <!-- Flood payload vao search.php -->
+  <rule id="100433" level="12" frequency="10" timeframe="60">
+    <if_matched_sid>100431,100432</if_matched_sid>
+    <same_source_ip/>
+    <description>WEBFLOOD T1190: Web attack flood tai search.php – >10/60s tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,high_volume</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM 5 – T1505.003: File Upload / Web Shell
+       ============================================================ -->
+
+  <!-- Upload file PHP -->
+  <rule id="100441" level="14">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>upload.php</url>
+    <match>\.php|\.php5|\.phtml|\.phar|\.shtml</match>
+    <description>WEBFLOOD T1505.003: PHP file upload attempt tai /lab/upload.php tu $(srcip)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>web_attack,file_upload,webshell</group>
+  </rule>
+
+  <!-- Truy cap file PHP trong thu muc uploads -->
+  <rule id="100442" level="15">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>/lab/uploads/</url>
+    <match>\.php|\.php5|\.phtml</match>
+    <description>WEBFLOOD T1505.003: CRITICAL – PHP webshell access tai /lab/uploads/ tu $(srcip)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>web_attack,webshell,critical</group>
+  </rule>
+
+  <!-- Upload + access: chain detection -->
+  <rule id="100443" level="15" timeframe="120">
+    <if_matched_sid>100441</if_matched_sid>
+    <same_source_ip/>
+    <description>WEBFLOOD T1505.003: CRITICAL – Upload PHP file va truy cap tu $(srcip)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>web_attack,webshell,critical,chain</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM 6 – T1190 (LFI): Path Traversal & Local File Inclusion
+       ============================================================ -->
+
+  <!-- Path traversal co ban -->
+  <rule id="100451" level="14">
+    <if_sid>31103,31106,30101</if_sid>
+    <url>/lab/</url>
+    <match>\.\./|\.\.\\|%2e%2e|%252e|\.\.%2f|\.\.%5c</match>
+    <description>WEBFLOOD T1190-LFI: Path Traversal attempt – $(match) tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,lfi,path_traversal</group>
+  </rule>
+
+  <!-- Truy cap file he thong nhaycam -->
+  <rule id="100452" level="15">
+    <if_sid>31103,31106,30101</if_sid>
+    <match>/etc/passwd|/etc/shadow|/etc/hosts|/proc/self|/var/log|/etc/apache2|mariadb\.conf</match>
+    <description>WEBFLOOD T1190-LFI: CRITICAL – Sensitive file access attempt – $(match) tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,lfi,sensitive_file,critical</group>
+  </rule>
+
+  <!-- Command injection trong query -->
+  <rule id="100453" level="14">
+    <if_sid>31103,31106,30101</if_sid>
+    <match>%7C\s*id|%3B\s*cat|%60whoami%60|\$\(id\)|;\s*cat\s+/etc|pipe.*passwd</match>
+    <description>WEBFLOOD T1190: Command Injection attempt tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+      <id>T1059.004</id>
+    </mitre>
+    <group>web_attack,command_injection</group>
+  </rule>
+
+  <!-- LFI flood -->
+  <rule id="100454" level="13" frequency="5" timeframe="60">
+    <if_matched_sid>100451,100452</if_matched_sid>
+    <same_source_ip/>
+    <description>WEBFLOOD T1190-LFI: LFI/Traversal flood – >5/60s tu $(srcip)</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,lfi,high_volume</group>
+  </rule>
+
+
+  <!-- ============================================================
+       NHOM TONG HOP – Phat hien toan bo cuoi tan cong
+       ============================================================ -->
+
+  <!-- Bat ky web attack cao tu WEBFLOOD -->
+  <rule id="100461" level="10">
+    <if_group>web_attack</if_group>
+    <same_source_ip/>
+    <description>WEBFLOOD: Web attack activity tu $(srcip) – xem alert cu the</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>webflood_summary</group>
+  </rule>
+
+  <!-- Multi-technique chain: cung IP dung nhieu technique -->
+  <rule id="100462" level="15" frequency="3" timeframe="300">
+    <if_matched_group>webflood_summary</if_matched_group>
+    <same_source_ip/>
+    <description>WEBFLOOD CRITICAL: Multi-technique web attack chain tu $(srcip) trong 5 phut</description>
+    <mitre>
+      <id>T1190</id>
+      <id>T1595.002</id>
+      <id>T1595.003</id>
+      <id>T1505.003</id>
+    </mitre>
+    <group>web_attack,attack_chain,critical</group>
+  </rule>
+
+</group>

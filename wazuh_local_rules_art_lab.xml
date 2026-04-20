@@ -1,0 +1,212 @@
+<group name="windows,art_lab,custom_rules,">
+
+  <!-- -------------------- -->
+  <!-- Base Windows rules   -->
+  <!-- -------------------- -->
+
+  <rule id="100100" level="5">
+    <field name="win.system.channel">Security</field>
+    <field name="win.system.eventID">4625</field>
+    <description>Windows failed logon observed</description>
+    <group>authentication_failed,windows,</group>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+  <rule id="100101" level="6">
+    <field name="win.system.channel">Security</field>
+    <field name="win.system.eventID">4776</field>
+    <description>Windows NTLM credential validation failure observed</description>
+    <group>authentication_failed,windows,</group>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+  <rule id="100102" level="4">
+    <field name="win.system.channel">Security</field>
+    <field name="win.system.eventID">4688</field>
+    <description>Windows process creation observed</description>
+    <group>process_creation,windows,</group>
+  </rule>
+
+  <!-- -------------------- -->
+  <!-- Brute Force rules    -->
+  <!-- -------------------- -->
+
+  <!-- Burst Mode/local brute force: catches local LogonUser bursts even without source IP -->
+  <rule id="100110" level="14" frequency="10" timeframe="60">
+    <if_matched_sid>100100</if_matched_sid>
+    <description>T1110.001: Brute force burst - more than 10 failed logons in 60 seconds</description>
+    <group>bruteforce,windows,authentication_failed,</group>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Password spraying: many users hit in a short period -->
+  <rule id="100111" level="12" frequency="5" timeframe="120">
+    <if_matched_sid>100100</if_matched_sid>
+    <different_user />
+    <description>T1110.003: Password spraying - multiple accounts failing in a short period</description>
+    <group>password_spraying,windows,authentication_failed,</group>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+  </rule>
+
+  <!-- RDP failed logons -->
+  <rule id="100112" level="12">
+    <field name="win.system.channel">Security</field>
+    <field name="win.system.eventID">4625</field>
+    <field name="win.eventdata.logonType">10</field>
+    <description>T1110.001: RDP failed logon (RemoteInteractive)</description>
+    <group>rdp,bruteforce,windows,authentication_failed,</group>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100113" level="10">
+    <field name="win.system.channel">Security</field>
+    <field name="win.system.eventID">4688</field>
+    <field name="win.eventdata.newProcessName" type="pcre2">(?i)\\(net|wmic)\.exe$</field>
+    <description>T1078: Account enumeration tooling executed</description>
+    <group>discovery,account_enumeration,windows,</group>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+
+  <!-- -------------------- -->
+  <!-- NMAP / recon rules   -->
+  <!-- -------------------- -->
+
+  <rule id="100120" level="10">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">1</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\nmap\.exe$</field>
+    <description>T1046/T1595.002: Nmap execution detected</description>
+    <group>reconnaissance,nmap,sysmon,windows,</group>
+    <mitre>
+      <id>T1046</id>
+      <id>T1595.002</id>
+    </mitre>
+  </rule>
+
+  <rule id="100121" level="12">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">1</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\pktmon\.exe$</field>
+    <description>T1040: Packet capture via pktmon detected</description>
+    <group>network_sniffing,sysmon,windows,</group>
+    <mitre>
+      <id>T1040</id>
+    </mitre>
+  </rule>
+
+  <rule id="100122" level="10">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">1</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\netstat\.exe$</field>
+    <description>T1049: Network connection enumeration via netstat</description>
+    <group>discovery,sysmon,windows,</group>
+    <mitre>
+      <id>T1049</id>
+    </mitre>
+  </rule>
+
+  <rule id="100123" level="10">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">11</field>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)(\\NmapLab\\.*\.(xml|txt)$|\.etl$)</field>
+    <description>NMAP artifact created (TXT/XML/ETL)</description>
+    <group>fim,sysmon,windows,</group>
+  </rule>
+
+  <rule id="100124" level="13" frequency="100" timeframe="60">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">3</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\nmap\.exe$</field>
+    <if_matched_sid>100120</if_matched_sid>
+    <description>T1046: High-volume network connections from nmap.exe</description>
+    <group>reconnaissance,nmap,sysmon,windows,</group>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+  </rule>
+
+  <!-- -------------------- -->
+  <!-- APT32 rules          -->
+  <!-- -------------------- -->
+
+  <rule id="100130" level="11">
+    <field name="win.system.channel">Microsoft-Windows-PowerShell/Operational</field>
+    <field name="win.system.eventID">4104</field>
+    <match>ExecutionPolicy Bypass</match>
+    <description>T1059.001: PowerShell execution policy bypass detected</description>
+    <group>powershell,windows,apt32,</group>
+    <mitre>
+      <id>T1059.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100131" level="11">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">1</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)(\\sysupdate\.exe$|\\RuntimeBroker_svc\.exe$)</field>
+    <description>T1036.005: Masqueraded binary execution from non-standard path</description>
+    <group>defense_evasion,sysmon,windows,apt32,</group>
+    <mitre>
+      <id>T1036.005</id>
+    </mitre>
+  </rule>
+
+  <rule id="100132" level="11">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">13</field>
+    <field name="win.eventdata.targetObject" type="pcre2">(?i)\\Software\\Microsoft\\Windows\\CurrentVersion\\Run</field>
+    <description>T1547.001: Registry Run key persistence detected</description>
+    <group>persistence,sysmon,windows,apt32,</group>
+    <mitre>
+      <id>T1547.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100133" level="15">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">10</field>
+    <field name="win.eventdata.targetImage" type="pcre2">(?i)\\lsass\.exe$</field>
+    <description>T1003.001: LSASS process access detected</description>
+    <group>credential_access,sysmon,windows,apt32,</group>
+    <mitre>
+      <id>T1003.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100134" level="10">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">11</field>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\\APT32-Lab\\(collection|staging)\\</field>
+    <description>T1074.001/T1560.001: Staging or archive artifact created in APT32 lab</description>
+    <group>collection,sysmon,windows,apt32,</group>
+    <mitre>
+      <id>T1074.001</id>
+      <id>T1560.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100135" level="11">
+    <field name="win.system.channel">Microsoft-Windows-Sysmon/Operational</field>
+    <field name="win.system.eventID">3</field>
+    <field name="win.eventdata.destinationIp">127.0.0.1</field>
+    <field name="win.eventdata.destinationPort">8081</field>
+    <description>T1041: Localhost C2/exfil network connection detected</description>
+    <group>exfiltration,sysmon,windows,apt32,</group>
+    <mitre>
+      <id>T1041</id>
+    </mitre>
+  </rule>
+
+</group>

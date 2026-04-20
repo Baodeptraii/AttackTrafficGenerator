@@ -1,0 +1,58 @@
+<Sysmon schemaversion="4.90">
+  <EventFiltering>
+    <!-- Process creation: NMAP + APT32 + Brute Force tooling -->
+    <ProcessCreate onmatch="include">
+      <Image condition="end with">\nmap.exe</Image>
+      <Image condition="end with">\pktmon.exe</Image>
+      <Image condition="end with">\netstat.exe</Image>
+      <Image condition="end with">\powershell.exe</Image>
+      <Image condition="end with">\cmdkey.exe</Image>
+      <Image condition="end with">\mstsc.exe</Image>
+      <Image condition="end with">\net.exe</Image>
+      <Image condition="end with">\wmic.exe</Image>
+      <Image condition="end with">\ssh.exe</Image>
+      <Image condition="end with">\sysupdate.exe</Image>
+      <Image condition="end with">\RuntimeBroker_svc.exe</Image>
+    </ProcessCreate>
+
+    <!-- Network connections: recon and localhost C2/exfil -->
+    <NetworkConnect onmatch="include">
+      <Image condition="end with">\nmap.exe</Image>
+      <Image condition="end with">\powershell.exe</Image>
+      <Image condition="end with">\pktmon.exe</Image>
+      <DestinationPort condition="is">21</DestinationPort>
+      <DestinationPort condition="is">22</DestinationPort>
+      <DestinationPort condition="is">80</DestinationPort>
+      <DestinationPort condition="is">443</DestinationPort>
+      <DestinationPort condition="is">135</DestinationPort>
+      <DestinationPort condition="is">139</DestinationPort>
+      <DestinationPort condition="is">445</DestinationPort>
+      <DestinationPort condition="is">3389</DestinationPort>
+      <DestinationPort condition="is">5985</DestinationPort>
+      <DestinationPort condition="is">8080</DestinationPort>
+      <DestinationPort condition="is">8081</DestinationPort>
+    </NetworkConnect>
+
+    <!-- Process access: LSASS safe-touch -->
+    <ProcessAccess onmatch="include">
+      <TargetImage condition="end with">\lsass.exe</TargetImage>
+    </ProcessAccess>
+
+    <!-- Registry persistence -->
+    <RegistryEvent onmatch="include">
+      <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+    </RegistryEvent>
+
+    <!-- File create artifacts for all three labs -->
+    <FileCreate onmatch="include">
+      <TargetFilename condition="contains">\APT32-Lab\</TargetFilename>
+      <TargetFilename condition="contains">\NmapLab\</TargetFilename>
+      <TargetFilename condition="contains">\BFLab\</TargetFilename>
+      <TargetFilename condition="end with">.etl</TargetFilename>
+      <TargetFilename condition="end with">.xml</TargetFilename>
+      <TargetFilename condition="end with">data.zip</TargetFilename>
+      <TargetFilename condition="end with">archive_manifest.txt</TargetFilename>
+      <TargetFilename condition="end with">exfil_log.txt</TargetFilename>
+    </FileCreate>
+  </EventFiltering>
+</Sysmon>

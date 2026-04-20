@@ -1,0 +1,22 @@
+<ossec_config>
+  <!-- Security events needed for Brute Force and 4688-based detections -->
+  <localfile>
+    <location>Security</location>
+    <log_format>eventchannel</log_format>
+    <query>Event[System[(EventID=4625 or EventID=4688 or EventID=4776)]]</query>
+  </localfile>
+
+  <!-- Sysmon events needed for NMAP + APT32 + Brute Force artifacts -->
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+    <query>Event[System[(EventID=1 or EventID=3 or EventID=10 or EventID=11 or EventID=13)]]</query>
+  </localfile>
+
+  <!-- PowerShell Script Block logging for APT32 loader detection -->
+  <localfile>
+    <location>Microsoft-Windows-PowerShell/Operational</location>
+    <log_format>eventchannel</log_format>
+    <query>Event[System[(EventID=4104)]]</query>
+  </localfile>
+</ossec_config>

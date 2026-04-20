@@ -1,0 +1,197 @@
+<Sysmon schemaversion="4.90">
+  <!--
+  ================================================================
+  WEBFLOOD v4.0 – Sysmon Configuration (Windows Attacker)
+  File: C:\KichBan\webflood_sysmon.xml
+  
+  Cai dat:
+    Cai moi: Sysmon64.exe -accepteula -i C:\KichBan\webflood_sysmon.xml
+    Cap nhat: Sysmon64.exe -c C:\KichBan\webflood_sysmon.xml
+    Kiem tra: Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 10
+  
+  Muc tieu: bat CHINH XAC cac Event phat sinh khi WEBFLOOD v4 chay:
+    Event 1  – ProcessCreate: powershell.exe (ART runner)
+    Event 3  – NetworkConnect: TCP -> 192.168.1.164:80
+    Event 11 – FileCreate: C:\Temp\WebFloodLab\*.txt, tmp_uploads\*
+    Event 4  – ServiceStateChange (Sysmon tu ghi lai)
+    Event 5  – ProcessTerminate: powershell.exe ket thuc
+    Event 13 – RegistryValueSet (neu ART ghi registry)
+  ================================================================
+  -->
+
+  <EventFiltering>
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 1 – ProcessCreate
+         Bat: powershell.exe chay ART, net.exe, cmd.exe
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="ProcessCreate_WEBFLOOD" groupRelation="or">
+      <ProcessCreate onmatch="include">
+
+        <!-- PowerShell – engine chinh cua ART -->
+        <Rule name="PS_ART_Runner" groupRelation="or">
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+
+        <!-- cmd.exe co the duoc goi boi ART -->
+        <Rule name="CMD_ART" groupRelation="and">
+          <Image condition="end with">cmd.exe</Image>
+          <CommandLine condition="contains">WebFloodLab</CommandLine>
+        </Rule>
+
+        <!-- net.exe, netsh, curl (neu co) -->
+        <Rule name="NetTools" groupRelation="or">
+          <Image condition="end with">net.exe</Image>
+          <Image condition="end with">curl.exe</Image>
+          <Image condition="end with">wget.exe</Image>
+        </Rule>
+
+      </ProcessCreate>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 3 – NetworkConnect
+         Bat: Tat ca TCP connection tu Windows -> 192.168.1.164:80
+         Day la event quan trong nhat – ghi lai tung HTTP request
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="NetworkConnect_WEBFLOOD" groupRelation="or">
+      <NetworkConnect onmatch="include">
+
+        <!-- Tat ca request tu powershell den target web server -->
+        <Rule name="PS_to_WebTarget" groupRelation="and">
+          <Image condition="end with">powershell.exe</Image>
+          <DestinationIp condition="is">192.168.1.164</DestinationIp>
+          <DestinationPort condition="is">80</DestinationPort>
+        </Rule>
+
+        <!-- Bat rong hon: bat ky process nao ket noi port 80 toi target -->
+        <Rule name="Any_to_WebTarget_80" groupRelation="and">
+          <DestinationIp condition="is">192.168.1.164</DestinationIp>
+          <DestinationPort condition="is">80</DestinationPort>
+        </Rule>
+
+        <!-- Bat ket noi toi port 8080, 8443 phong truong hop lab doi port -->
+        <Rule name="Any_to_WebTarget_AltPort" groupRelation="and">
+          <DestinationIp condition="is">192.168.1.164</DestinationIp>
+          <DestinationPort condition="is">8080</DestinationPort>
+        </Rule>
+
+      </NetworkConnect>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 5 – ProcessTerminate
+         Bat: powershell.exe sau khi ART hoan thanh
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="ProcessTerminate_WEBFLOOD" groupRelation="or">
+      <ProcessTerminate onmatch="include">
+        <Rule name="PS_Terminate" groupRelation="or">
+          <Image condition="end with">powershell.exe</Image>
+        </Rule>
+      </ProcessTerminate>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 11 – FileCreate
+         Bat: Tat ca file tao ra trong C:\Temp\WebFloodLab\
+         Ghi lai artifact log va file upload tam
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="FileCreate_WEBFLOOD" groupRelation="or">
+      <FileCreate onmatch="include">
+
+        <!-- Thu muc output chinh cua WEBFLOOD -->
+        <Rule name="WebFloodLab_Dir" groupRelation="or">
+          <TargetFilename condition="begin with">C:\Temp\WebFloodLab\</TargetFilename>
+        </Rule>
+
+        <!-- File upload tam truoc khi gui len server -->
+        <Rule name="WebFloodLab_Uploads" groupRelation="or">
+          <TargetFilename condition="contains">tmp_uploads</TargetFilename>
+        </Rule>
+
+        <!-- File .php tao boi ART (phat hien webshell sim) -->
+        <Rule name="PHP_FileCreate" groupRelation="or">
+          <TargetFilename condition="end with">.php</TargetFilename>
+          <TargetFilename condition="end with">.php5</TargetFilename>
+          <TargetFilename condition="end with">.phtml</TargetFilename>
+        </Rule>
+
+      </FileCreate>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 12/13 – RegistryEvent / RegistryValueSet
+         Bat: ART co the ghi registry khi set ExecutionPolicy
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="Registry_WEBFLOOD" groupRelation="or">
+      <RegistryEvent onmatch="include">
+
+        <!-- PowerShell Execution Policy – ART can bypass -->
+        <Rule name="PS_ExecutionPolicy" groupRelation="or">
+          <TargetObject condition="contains">ExecutionPolicy</TargetObject>
+        </Rule>
+
+        <!-- InvokeAtomicTest co the ghi registry -->
+        <Rule name="AtomicTest_Registry" groupRelation="or">
+          <TargetObject condition="contains">AtomicRedTeam</TargetObject>
+        </Rule>
+
+      </RegistryEvent>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EVENT 22 – DNSQuery
+         Bat: DNS query cho ten mien (neu dung hostname thay vi IP)
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="DNSQuery_WEBFLOOD" groupRelation="or">
+      <DnsQuery onmatch="include">
+
+        <!-- DNS query cho lab.local (neu cau hinh hostname) -->
+        <Rule name="LabDNS" groupRelation="or">
+          <QueryName condition="end with">lab.local</QueryName>
+          <QueryName condition="contains">192.168.1.164</QueryName>
+        </Rule>
+
+      </DnsQuery>
+    </RuleGroup>
+
+
+    <!-- ══════════════════════════════════════════════════════════
+         EXCLUDE – Bo qua noise he thong
+         Giu log sach, tranh bi am thanh nen lam nhieu
+         ══════════════════════════════════════════════════════════ -->
+    <RuleGroup name="Exclude_System_Noise" groupRelation="or">
+
+      <ProcessCreate onmatch="exclude">
+        <!-- Windows update, antivirus, system service – khong lien quan -->
+        <Image condition="begin with">C:\Windows\System32\svchost.exe</Image>
+        <Image condition="begin with">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="begin with">C:\Windows\System32\WerFault.exe</Image>
+        <Image condition="begin with">C:\Program Files\Windows Defender\</Image>
+        <Image condition="begin with">C:\Program Files (x86)\Microsoft\</Image>
+      </ProcessCreate>
+
+      <NetworkConnect onmatch="exclude">
+        <!-- Loai tru ket noi Windows Update, telemetry -->
+        <DestinationPort condition="is">443</DestinationPort>
+        <DestinationIp condition="begin with">10.0.0.</DestinationIp>
+        <!-- Chi giu ket noi den 192.168.1.164 -->
+        <DestinationIp condition="is not">192.168.1.164</DestinationIp>
+      </NetworkConnect>
+
+      <FileCreate onmatch="exclude">
+        <!-- Loai temp file Windows -->
+        <TargetFilename condition="begin with">C:\Windows\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Program Files\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Temp\</TargetFilename>
+      </FileCreate>
+
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>
