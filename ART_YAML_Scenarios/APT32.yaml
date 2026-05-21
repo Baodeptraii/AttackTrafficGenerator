@@ -1,58 +1,6 @@
 attack_technique: T1566.001
 display_name: APT32 Espionage Attack Simulation v2
 
-description: >
-  Redesigned APT32 partial attack chain on a single Windows 10/11 host.
-  Improvements over v1: added T1055 (process injection) and T1003.001
-  (LSASS safe-touch) for deeper credential access simulation; added XML
-  output and correlation markers; separated collection and staging into
-  distinct steps; added global cleanup step; all descriptions in ASCII.
-
-author: SOC Lab
-version: 2.0
-platform: windows
-category: apt
-severity: high
-mode: simulation
-scope: single-host
-safe: true
-
-mitre_techniques:
-  - T1566.001
-  - T1059.001
-  - T1036.005
-  - T1547.001
-  - T1055
-  - T1003.001
-  - T1082
-  - T1057
-  - T1083
-  - T1560.001
-  - T1074.001
-  - T1041
-
-requirements:
-  os: [Windows 10, Windows 11]
-  software: [PowerShell 5.1+, Python 3.x]
-  privileges: [user - RunAs Administrator for steps 5 and 6]
-  network: [localhost only]
-  pre_run:
-    - Start HTTP mock server: python -m http.server 8081 --bind 127.0.0.1
-    - Enable Sysmon Event 1, 3, 10, 11, 13
-    - Enable auditpol Process Creation (4688) + cmdline logging
-    - Ensure Wazuh agent is running and connected to Manager
-    - Disable Windows Defender real-time protection
-
-environment:
-  base_dir: C:\APT32-Lab
-  directories:
-    - C:\APT32-Lab\phishing
-    - C:\APT32-Lab\payloads
-    - C:\APT32-Lab\staging
-    - C:\APT32-Lab\collection
-    - C:\APT32-Lab\exfil
-    - C:\APT32-Lab\server
-
 atomic_tests:
 
 # ------------------------------------------------------------------
@@ -87,11 +35,11 @@ atomic_tests:
       Start-Sleep -Seconds 1
       '@
 
-            # Masquerade binary stub
-            Copy-Item "$env:SystemRoot\System32\calc.exe" "$base\payloads\sysupdate.exe" -Force
+      # Masquerade binary stub
+      Copy-Item "$env:SystemRoot\System32\calc.exe" "$base\payloads\sysupdate.exe" -Force
 
-            # Collection script stub
-            Set-Content "$base\payloads\collect.ps1" @'
+      # Collection script stub
+      Set-Content "$base\payloads\collect.ps1" @'
       Write-Host "[APT32] Collection script running"
       '@
 
@@ -112,7 +60,7 @@ atomic_tests:
       Write-Host "[+] Lab directory structure created under $base"
       exit 0
     cleanup_command: |
-    Remove-Item "#{base_dir}" -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item "#{base_dir}" -Recurse -Force -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------------
 # STEP 1 - T1566.001: Phishing Attachment (Initial Access)
@@ -637,42 +585,3 @@ atomic_tests:
       }
       Write-Host "[Cleanup] Done."
       exit 0
-
-
-post_conditions:
-  files_created:
-    - 'C:\APT32-Lab\staging\hostinfo.txt'
-    - 'C:\APT32-Lab\staging\process_list.txt'
-    - 'C:\APT32-Lab\staging\security_products.txt'
-    - 'C:\APT32-Lab\staging\file_discovery.txt'
-    - 'C:\APT32-Lab\staging\masquerade_marker.txt'
-    - 'C:\APT32-Lab\staging\injection_marker.txt'
-    - 'C:\APT32-Lab\staging\lsass_touch.txt'
-    - 'C:\APT32-Lab\staging\persistence_log.txt'
-    - 'C:\APT32-Lab\staging\data.zip'
-    - 'C:\APT32-Lab\staging\archive_manifest.txt'
-    - 'C:\APT32-Lab\exfil\exfil_log.txt'
-  registry:
-    - 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SystemUpdateSvc'
-  network:
-    - 'HTTP POST to 127.0.0.1:8081/upload'
-    - 'HTTP GET to 127.0.0.1:8081/beacon'
-  sysmon_events:
-    - 'Event 1 (ProcessCreate): powershell.exe, tasklist.exe, systeminfo.exe'
-    - 'Event 3 (NetworkConnect): HTTP POST/GET to 127.0.0.1:8081'
-    - 'Event 10 (ProcessAccess): lsass.exe access'
-    - 'Event 11 (FileCreate): staging and collection files'
-    - 'Event 13 (RegistryValueSet): HKCU Run key'
-  wazuh_alerts:
-    - 'Office spawning PowerShell - HIGH (T1566.001)'
-    - 'PowerShell ExecutionPolicy Bypass - HIGH (T1059.001)'
-    - 'Masquerade binary in Public profile - HIGH (T1036.005)'
-    - 'Registry Run key persistence - HIGH (T1547.001)'
-    - 'Suspicious child process spawn (injection sim) - MEDIUM (T1055)'
-    - 'LSASS process access - CRITICAL (T1003.001)'
-    - 'System discovery sequence - HIGH (T1082)'
-    - 'Security product enumeration - HIGH (T1057)'
-    - 'Mass file discovery user directories - HIGH (T1083)'
-    - 'Data staging to collection folder - HIGH (T1074.001)'
-    - 'Compress-Archive on user data - HIGH (T1560.001)'
-    - 'HTTP POST to localhost C2 mock - HIGH (T1041)'
