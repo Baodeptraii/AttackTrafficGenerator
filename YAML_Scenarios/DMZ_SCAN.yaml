@@ -1,0 +1,48 @@
+attack_technique: T1046
+display_name: Network Service Discovery
+
+atomic_tests:
+  - name: Nmap Aggressive Target Scan (DMZ)
+    auto_generated_guid: a1b2c3d4-e5f6-7890-1234-56789abcdef0
+    description: |
+      Sử dụng Nmap để quét sâu (Aggressive Scan) các máy mục tiêu cụ thể trong mạng DMZ.
+      Nhận diện các cổng mở, phiên bản dịch vụ và đoán nhận hệ điều hành.
+      Kết quả được lưu thành file txt.
+    supported_platforms:
+      - windows
+    input_arguments:
+      target_ips:
+        description: Các IP mục tiêu cần quét
+        type: string
+        default: 192.168.78.3 192.168.78.49 192.168.78.100
+      output_dir:
+        description: Thư mục lưu kết quả
+        type: path
+        default: C:\Temp\NmapLab
+      output_file:
+        description: Tên file báo cáo kết quả
+        type: string
+        default: DMZ_Target_Scan_Report.txt
+    executor:
+      name: powershell
+      elevation_required: true
+      command: |
+        # Đảm bảo thư mục lưu trữ tồn tại
+        if (-not (Test-Path "#{output_dir}")) { New-Item -ItemType Directory -Force -Path "#{output_dir}" | Out-Null }
+        $ReportPath = Join-Path "#{output_dir}" "#{output_file}"
+        
+        # Tìm đường dẫn tuyệt đối của Nmap
+        $nmapPath = "C:\Program Files (x86)\Nmap\nmap.exe"
+        if (-not (Test-Path $nmapPath)) { $nmapPath = "C:\Program Files\Nmap\nmap.exe" }
+        
+        if (-not (Test-Path $nmapPath)) {
+            Write-Error "[!] Khong tim thay nmap.exe. Vui long kiem tra lai thu muc cai dat!"
+            exit 1
+        }
+
+        Write-Host "[*] Dang khoi chay Nmap tai $nmapPath de quet cac muc tieu: #{target_ips}" -ForegroundColor Cyan
+        
+        # Gọi Nmap bằng toán tử & (Call Operator) với đường dẫn tuyệt đối
+        & $nmapPath -sV -O -T4 #{target_ips} -oN "$ReportPath"
+        
+        Write-Host "[+] Hoan thanh! Bao cao duoc luu tai: $ReportPath" -ForegroundColor Green
