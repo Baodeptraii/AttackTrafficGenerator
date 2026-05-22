@@ -1,5 +1,5 @@
 id: 4606b5b3-2607-4c01-b75b-a08a617df748
-name: [001] Basic Later Scen
+name: "[001] Basic Later Scen"
 description: Basic SSH Lateral Moverment
 objective: 495a9828-cab1-44dd-a0ca-66e58177d8cc
 atomic_ordering:
